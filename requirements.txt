@@ -1,0 +1,4 @@
+aiohttp>=3.9
+aiohttp-socks>=0.8
+requests>=2.31
+geoip2>=4.7

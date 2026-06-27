@@ -1,0 +1,8 @@
+# NEVER commit secrets or downloaded binaries
+config.json
+venv/
+bin/
+*.mmdb
+__pycache__/
+*.pyc
+.env

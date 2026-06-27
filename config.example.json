@@ -1,0 +1,38 @@
+{
+  "_comment": "Copy this file to config.json (the setup wizard does it for you). DO NOT commit config.json - it contains your GitHub token.",
+
+  "sources": [
+    "https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/main/V2Ray-Config-By-EbraSha.txt",
+    "https://raw.githubusercontent.com/barry-far/V2ray-config/main/All_Configs_Sub.txt",
+    "https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/All_Configs_Sub.txt",
+    "https://raw.githubusercontent.com/MatinGhanbari/v2ray-configs/main/subscriptions/v2ray/all_sub.txt"
+  ],
+
+  "github_token": "",
+  "gist_id": "",
+  "gist_filename": "zone-vpn.json",
+
+  "name_prefix": "zone-vpn",
+
+  "interval_minutes": 10,
+
+  "xray_path": "auto",
+  "geoip_db": "GeoLite2-Country.mmdb",
+
+  "test": {
+    "tcp_prefilter": true,
+    "tcp_timeout": 3,
+    "tcp_concurrency": 256,
+
+    "test_url": "http://cp.cloudflare.com/generate_204",
+    "expected_status": [204, 200],
+    "timeout": 5,
+    "batch_size": 100,
+    "parallel_batches": 4,
+    "base_port": 20000,
+    "max_ping": 3000,
+    "max_configs_to_test": 0,
+    "max_output": 300,
+    "min_per_country": 0
+  }
+}
