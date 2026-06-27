@@ -151,6 +151,7 @@ sudo systemctl restart zonevpn    # اعمال تغییرات
 | `gist_id` / `gist_filename` | مقصد انتشار |
 | `name_prefix` | پیشوند اسم (پیش‌فرض `zone-vpn`) |
 | `interval_minutes` | فاصلهٔ به‌روزرسانی (پیش‌فرض ۱۰) |
+| `test.tls_allow_insecure` | افزودن `allowInsecure` به TLS تا کانفیگ‌های trojan/vmess/tls با SNI جعلی هم سبز شوند (پیش‌فرض روشن؛ نیازمند xray `v25.12.8` که نصب‌کننده پین می‌کند) |
 | `test.tcp_prefilter` | پیش‌فیلتر TCP قبل از xray (پیش‌فرض روشن — حذف سریع سرورهای مرده/فیلتر) |
 | `test.tcp_timeout` / `test.tcp_concurrency` | زمان و هم‌زمانی پیش‌فیلتر |
 | `test.test_url` | آدرس تست پینگ (پیش‌فرض `cp.cloudflare.com/generate_204`) |
@@ -194,6 +195,7 @@ https://raw.githubusercontent.com/<user>/<repo>/<branch>/<file>.txt
 ```
 - **GeoIP محلی** است (بدون محدودیت نرخ)؛ اگر دیتابیس نبود، به‌صورت خودکار از `ip-api.com` استفاده می‌شود.
 - چون این سرور **در ایران** است، پینگ‌ها دقیقاً همان چیزی است که کاربر ایرانی تجربه می‌کند — همان هدف اصلی.
+- **نسخهٔ xray:** پیش‌فرض روی `v25.12.8` پین شده — آخرین نسخه‌ای که هنوز `allowInsecure` را دارد (از v26.1 به بعد حذف شده). هم کانفیگ‌های جدید را کامل پارس می‌کند هم yield بالاست. اگر آخرین نسخه را می‌خواهی: `XRAY_VERSION=latest sudo bash install.sh` و سپس `tls_allow_insecure` را در `config.json` روی `false` بگذار (وگرنه xray جدید بالا نمی‌آید).
 - اگر دسترسی سرور به گیت‌هاب محدود بود، می‌توانی متغیر محیطی پراکسی بدهی:
   ```bash
   sudo systemctl edit zonevpn

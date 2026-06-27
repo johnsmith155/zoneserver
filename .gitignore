@@ -2,6 +2,8 @@
 config.json
 venv/
 bin/
+bin-old/
+vertest/
 *.mmdb
 __pycache__/
 *.pyc

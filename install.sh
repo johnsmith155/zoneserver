@@ -34,7 +34,14 @@ python3 -m venv "$APP_DIR/venv"
 "$APP_DIR/venv/bin/pip" install -r "$APP_DIR/requirements.txt"
 
 # --------------------------------------------------------------------------- #
-say "Downloading xray-core ..."
+# Pinned to v25.12.8 - the LAST xray release that still supports the TLS
+# 'allowInsecure' option (removed from v26.1.x onward). It parses all modern
+# config fields AND lets the many free trojan/vmess/tls configs with a fake SNI
+# pass testing -> much higher yield. Override with:
+#   XRAY_VERSION=latest sudo bash install.sh
+# (then set tls_allow_insecure=false in config.json, else newer xray won't start).
+XRAY_VERSION="${XRAY_VERSION:-v25.12.8}"
+say "Downloading xray-core ${XRAY_VERSION} ..."
 mkdir -p "$APP_DIR/bin"
 ARCH="$(uname -m)"
 case "$ARCH" in
@@ -43,7 +50,11 @@ case "$ARCH" in
   armv7l)        XPKG="Xray-linux-arm32-v7a.zip" ;;
   *) err "Unsupported architecture: $ARCH"; exit 1 ;;
 esac
-XURL="https://github.com/XTLS/Xray-core/releases/latest/download/${XPKG}"
+if [ "$XRAY_VERSION" = "latest" ]; then
+  XURL="https://github.com/XTLS/Xray-core/releases/latest/download/${XPKG}"
+else
+  XURL="https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/${XPKG}"
+fi
 TMP="$(mktemp -d)"
 curl -fsSL "$XURL" -o "$TMP/xray.zip"
 unzip -o "$TMP/xray.zip" xray -d "$APP_DIR/bin" >/dev/null

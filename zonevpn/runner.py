@@ -7,7 +7,7 @@ import time
 from typing import List
 
 from . import config as cfgmod
-from . import gist, sources
+from . import gist, links, sources
 from .geo import GeoResolver
 from .links import ParsedConfig
 from .rename import build_output
@@ -19,6 +19,9 @@ log = logging.getLogger("zonevpn.runner")
 async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
     t0 = time.monotonic()
     test_cfg = cfg.get("test", {})
+
+    # allowInsecure in TLS outbounds (needs an xray build that still supports it)
+    links.ALLOW_INSECURE = bool(test_cfg.get("tls_allow_insecure", False))
 
     # 1. collect
     configs = await sources.collect(cfg.get("sources", []))

@@ -19,6 +19,11 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
+# When True, TLS outbounds include allowInsecure=true. Only works on xray-core
+# versions that still support it (removed in recent releases). Set from config.
+ALLOW_INSECURE = False
+
+
 @dataclass
 class ParsedConfig:
     protocol: str            # vmess | vless | trojan | shadowsocks
@@ -97,7 +102,14 @@ def _build_stream(network: str, security: str, params: dict, host_fallback: str)
             }
 
     if security == "tls":
-        tls = {"serverName": sni or host or host_fallback, "allowInsecure": True}
+        # NOTE: 'allowInsecure' was removed in recent xray-core and aborts config
+        # loading there. We only add it when ALLOW_INSECURE is on (pin an older
+        # xray in that case). With it on, configs using a mismatched/self-signed
+        # cert (very common in free lists) still pass and remain usable in apps
+        # that support allowInsecure.
+        tls = {"serverName": sni or host or host_fallback}
+        if ALLOW_INSECURE:
+            tls["allowInsecure"] = True
         if fp:
             tls["fingerprint"] = fp
         alpn = params.get("alpn")

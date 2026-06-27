@@ -21,6 +21,8 @@
   "geoip_db": "GeoLite2-Country.mmdb",
 
   "test": {
+    "tls_allow_insecure": true,
+
     "tcp_prefilter": true,
     "tcp_timeout": 3,
     "tcp_concurrency": 256,

@@ -87,24 +87,23 @@ class Tester:
 
     # ------------------------------------------------------------------ #
     async def _run_batch(self, batch: List[ParsedConfig], port_base: int) -> List[ParsedConfig]:
+        if not batch:
+            return []
+
         config_path = self._write_batch_config(batch, port_base)
         proc = None
+        started = False
         try:
             proc = await asyncio.create_subprocess_exec(
                 self.xray_path, "run", "-c", config_path,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
-            if not await self._wait_ready(port_base, batch):
-                log.warning("batch on port %d failed to start", port_base)
-                return []
-
-            tasks = [
-                self._test_one(port_base + i, cfg)
-                for i, cfg in enumerate(batch)
-            ]
-            tested = await asyncio.gather(*tasks)
-            return [c for c in tested if c is not None]
+            started = await self._wait_ready(port_base, proc)
+            if started:
+                tasks = [self._test_one(port_base + i, cfg) for i, cfg in enumerate(batch)]
+                tested = await asyncio.gather(*tasks)
+                return [c for c in tested if c is not None]
         finally:
             if proc and proc.returncode is None:
                 try:
@@ -119,6 +118,20 @@ class Tester:
                 os.unlink(config_path)
             except OSError:
                 pass
+
+        # Startup failed: one (or more) configs in this batch are unparseable by
+        # xray. Isolate them by splitting the batch and retrying each half, so a
+        # single bad config never wastes a whole batch of good ones. The halves
+        # run concurrently on disjoint port ranges (right offset by mid) so deep
+        # splits stay fast instead of adding up serially.
+        if len(batch) == 1:
+            return []  # the lone config can't start -> drop it
+        mid = len(batch) // 2
+        left, right = await asyncio.gather(
+            self._run_batch(batch[:mid], port_base),
+            self._run_batch(batch[mid:], port_base + mid),
+        )
+        return left + right
 
     def _write_batch_config(self, batch: List[ParsedConfig], port_base: int) -> str:
         inbounds, outbounds, rules = [], [], []
@@ -148,13 +161,20 @@ class Tester:
             json.dump(xray_cfg, fh)
         return path
 
-    async def _wait_ready(self, port_base: int, batch: List[ParsedConfig]) -> bool:
-        """Wait until the first inbound accepts a TCP connection (xray is up)."""
-        deadline = time.monotonic() + 5
+    async def _wait_ready(self, port_base: int, proc) -> bool:
+        """Wait until the first inbound accepts a TCP connection (xray is up).
+
+        Fails fast: if xray rejected the config it exits within ~200ms, so we
+        detect the dead process immediately instead of polling for the full
+        deadline. This keeps the split-on-failure path cheap.
+        """
+        deadline = time.monotonic() + 4
         while time.monotonic() < deadline:
+            if proc.returncode is not None:  # xray died (bad config) -> stop early
+                return False
             try:
-                reader, writer = await asyncio.wait_for(
-                    asyncio.open_connection("127.0.0.1", port_base), timeout=0.5
+                _, writer = await asyncio.wait_for(
+                    asyncio.open_connection("127.0.0.1", port_base), timeout=0.4
                 )
                 writer.close()
                 try:
@@ -163,7 +183,7 @@ class Tester:
                     pass
                 return True
             except Exception:
-                await asyncio.sleep(0.15)
+                await asyncio.sleep(0.1)
         return False
 
     async def _test_one(self, port: int, cfg: ParsedConfig) -> Optional[ParsedConfig]:
