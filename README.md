@@ -37,6 +37,40 @@
 - فیلد `config` همان لینک کامل کانفیگ با اسم جدید (پرچم + zone-vpn) است.
 - فیلد `raw` همهٔ لینک‌ها را خط‌به‌خط دارد؛ اگر خواستی می‌توانی مستقیم به‌عنوان subscription هم استفاده‌اش کنی.
 
+### ⚠️ ذخیره‌سازی base64 (پیش‌فرض روشن)
+چون `gist_base64: true` است، محتوای Gist **خودِ این JSON نیست**؛ بلکه یک رشتهٔ **base64 از همان JSON فشرده** است تا تابلو نباشد. اپ موبایل باید:
+
+```
+base64-decode → UTF-8 → JSON.parse
+```
+
+اگر خواستی JSON خام و خوانا ذخیره شود، در `config.json` مقدار `gist_base64` را `false` کن.
+
+**نمونهٔ دیکد در اپ:**
+
+Dart / Flutter:
+```dart
+import 'dart:convert';
+final raw = await http.get(Uri.parse(gistRawUrl)).then((r) => r.body);
+final jsonStr = utf8.decode(base64.decode(raw.trim()));
+final data = jsonDecode(jsonStr);
+final configs = data['configs']; // مرتب‌شده از کم‌ترین پینگ
+```
+
+Kotlin (Android):
+```kotlin
+val raw = URL(gistRawUrl).readText().trim()
+val jsonStr = String(android.util.Base64.decode(raw, android.util.Base64.DEFAULT), Charsets.UTF_8)
+val data = JSONObject(jsonStr)
+val configs = data.getJSONArray("configs")
+```
+
+JavaScript:
+```js
+const raw = (await (await fetch(gistRawUrl)).text()).trim();
+const data = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(raw), c => c.charCodeAt(0))));
+```
+
 ---
 
 ## بخش ۱ — کارهای گیت‌هاب (یک‌بار، روی کامپیوتر خودت)

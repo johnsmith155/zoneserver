@@ -67,7 +67,10 @@ async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
 
     # 6. build payload + publish
     payload = build_output(alive, cfg.get("name_prefix", "zone-vpn"))
-    ok = gist.publish(cfg["github_token"], cfg["gist_id"], cfg["gist_filename"], payload)
+    ok = gist.publish(
+        cfg["github_token"], cfg["gist_id"], cfg["gist_filename"], payload,
+        base64_encode=bool(cfg.get("gist_base64", True)),
+    )
     if ok:
         log.info("published %d configs to gist %s (%.1fs total)",
                  payload["count"], cfg["gist_id"], time.monotonic() - t0)

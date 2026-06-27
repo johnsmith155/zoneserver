@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 from typing import Optional
@@ -50,6 +51,14 @@ def raw_url(gist_id: str, filename: str) -> str:
     return f"https://gist.githubusercontent.com/raw/{gist_id}/{filename}"
 
 
-def publish(token: str, gist_id: str, filename: str, payload: dict) -> bool:
-    content = json.dumps(payload, ensure_ascii=False, indent=2)
+def publish(token: str, gist_id: str, filename: str, payload: dict,
+            base64_encode: bool = False) -> bool:
+    """Publish the payload. When base64_encode is set, the gist stores a single
+    base64 string of the (compact) JSON instead of readable JSON, so the content
+    is not obvious at a glance. The mobile app must base64-decode -> utf-8 -> JSON."""
+    if base64_encode:
+        raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        content = base64.b64encode(raw).decode("ascii")
+    else:
+        content = json.dumps(payload, ensure_ascii=False, indent=2)
     return update_gist(token, gist_id, filename, content)
