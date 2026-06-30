@@ -18,6 +18,7 @@ from logging.handlers import RotatingFileHandler
 from . import config as cfgmod
 from . import state
 from .geo import GeoResolver
+from .migrate import migrate_config
 from .runner import run_cycle
 
 _fmt = logging.Formatter(
@@ -55,6 +56,12 @@ def _install_signal_handlers(loop: asyncio.AbstractEventLoop) -> None:
 
 
 async def run_single() -> None:
+    # Self-heal the config structure first, so a freshly-pulled build never runs
+    # on a stale config that's missing newly-added settings.
+    try:
+        migrate_config()
+    except Exception:
+        log.exception("config migration failed (continuing)")
     cfg = cfgmod.load()
     if not cfg.get("github_token") or not cfg.get("gist_id"):
         raise SystemExit("github_token and gist_id must be set in config.json "
@@ -66,6 +73,11 @@ async def run_single() -> None:
 
 
 async def main_loop() -> None:
+    try:
+        if migrate_config():
+            log.info("config.json was auto-migrated to the latest structure")
+    except Exception:
+        log.exception("config migration failed (continuing)")
     cfg = cfgmod.load()
     if not cfg.get("github_token") or not cfg.get("gist_id"):
         raise SystemExit("github_token and gist_id must be set in config.json "

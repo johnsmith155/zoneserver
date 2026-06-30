@@ -108,14 +108,25 @@ chmod 600 "$APP_DIR/config.json"
 mkdir -p "$APP_DIR/state"
 chown -R "$RUN_USER":"$RUN_USER" "$APP_DIR/state"
 
-# Allow the (non-root) dashboard user to run the hard-update script via sudo
-# without a password — scoped to exactly that one script.
-say "Installing sudoers rule for the Update button ..."
+# Allow the (non-root) user to run the update scripts via sudo without a
+# password — scoped to exactly those scripts (used by the dashboard button, the
+# `zonevpn` menu, and the auto-update timer).
+say "Installing sudoers rule for the update scripts ..."
 cat > "/etc/sudoers.d/zonevpn" <<EOF
-${RUN_USER} ALL=(root) NOPASSWD: ${APP_DIR}/update.sh
+${RUN_USER} ALL=(root) NOPASSWD: ${APP_DIR}/update.sh, ${APP_DIR}/autoupdate.sh
 EOF
 chmod 440 "/etc/sudoers.d/zonevpn"
-chmod +x "$APP_DIR/update.sh"
+chmod +x "$APP_DIR/update.sh" "$APP_DIR/autoupdate.sh" "$APP_DIR/zonevpn.sh"
+
+# Install the `zonevpn` control menu as a global command.
+say "Installing the 'zonevpn' menu command ..."
+ln -sf "$APP_DIR/zonevpn.sh" /usr/local/bin/zonevpn
+
+# Self-heal config.json to the latest structure (adds any new settings).
+if [[ -f "$APP_DIR/config.json" ]]; then
+  say "Migrating config.json to the latest structure ..."
+  sudo -u "$RUN_USER" "$APP_DIR/venv/bin/python" -m zonevpn.migrate || true
+fi
 
 # --------------------------------------------------------------------------- #
 say "Installing systemd service ..."
@@ -159,8 +170,38 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
+# --------------------------------------------------------------------------- #
+# Auto-update: a timer that checks origin/main hourly and hard-updates if there
+# are new commits. This is what makes the server pick up new code automatically.
+say "Installing auto-update timer ..."
+cat > "/etc/systemd/system/zonevpn-autoupdate.service" <<EOF
+[Unit]
+Description=ZoneVPN auto-update (pull latest code + migrate + restart)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=${APP_DIR}
+ExecStart=/usr/bin/env bash ${APP_DIR}/autoupdate.sh
+EOF
+
+cat > "/etc/systemd/system/zonevpn-autoupdate.timer" <<EOF
+[Unit]
+Description=ZoneVPN auto-update check (hourly)
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
 systemctl daemon-reload
 systemctl enable "${SERVICE_NAME}" "${DASH_NAME}"
+systemctl enable --now zonevpn-autoupdate.timer
 systemctl restart "${SERVICE_NAME}"
 systemctl restart "${DASH_NAME}"
 
@@ -174,10 +215,12 @@ IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 DASH_PORT="$("$APP_DIR/venv/bin/python" -c "import json;print(json.load(open('$APP_DIR/config.json')).get('dashboard_port',8787))" 2>/dev/null || echo 8787)"
 
 say "Done!"
+echo "  Control menu     :  zonevpn            <- just type this anytime"
 echo "  Collector status :  systemctl status ${SERVICE_NAME}"
 echo "  Dashboard status :  systemctl status ${DASH_NAME}"
 echo "  Logs             :  journalctl -u ${SERVICE_NAME} -f"
-echo "  Edit config      :  ${APP_DIR}/venv/bin/python setup_wizard.py   (then: systemctl restart ${SERVICE_NAME})"
+echo "  Auto-update      :  enabled (hourly) — systemctl list-timers zonevpn-autoupdate.timer"
+echo "  Edit config      :  zonevpn  ->  6   (or: ${APP_DIR}/venv/bin/python setup_wizard.py)"
 echo ""
 echo "  ┌─ Dashboard ────────────────────────────────────────────────"
 echo "  │  http://${IP:-SERVER_IP}:${DASH_PORT}/?token=${DASH_TOKEN}"

@@ -42,6 +42,19 @@ if [ -x "$APP_DIR/venv/bin/pip" ]; then
   fi
 fi
 
+# Self-heal the config: pull in any new settings/sections the new code expects,
+# preserving the operator's existing values (token, gist id, tuned numbers).
+if [ -x "$APP_DIR/venv/bin/python" ] && [ -f "$APP_DIR/config.json" ]; then
+  say "Migrating config.json to the latest structure ..."
+  "$APP_DIR/venv/bin/python" -m zonevpn.migrate || true
+fi
+
+# Refresh the `zonevpn` menu launcher so new menu features land automatically.
+if [ -f "$APP_DIR/zonevpn.sh" ]; then
+  chmod +x "$APP_DIR/zonevpn.sh"
+  ln -sf "$APP_DIR/zonevpn.sh" /usr/local/bin/zonevpn 2>/dev/null || true
+fi
+
 say "Restarting services ..."
 systemctl daemon-reload || true
 systemctl start "${SERVICE_NAME}"
