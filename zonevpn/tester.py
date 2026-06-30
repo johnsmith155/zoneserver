@@ -15,7 +15,7 @@ import logging
 import os
 import tempfile
 import time
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 import aiohttp
 from aiohttp_socks import ProxyConnector
@@ -59,6 +59,14 @@ class Tester:
         # Created in run(), bound to the running event loop.
         self._measure_sem: Optional[asyncio.Semaphore] = None
 
+        # Live progress (for the dashboard). Reset at the start of every run().
+        self._progress_cb: Optional[Callable[[dict], None]] = None
+        self._total = 0
+        self._tested = 0
+        self._alive = 0
+        self._recent: List[dict] = []
+        self._last_emit = 0.0
+
     async def tcp_prefilter(self, configs: List[ParsedConfig],
                             timeout: float, concurrency: int) -> List[ParsedConfig]:
         """Cheaply drop servers that don't even accept a TCP connection.
@@ -87,9 +95,18 @@ class Tester:
         results = await asyncio.gather(*[check(c) for c in configs])
         return [c for c in results if c is not None]
 
-    async def run(self, configs: List[ParsedConfig]) -> List[ParsedConfig]:
+    async def run(self, configs: List[ParsedConfig],
+                  progress_cb: Optional[Callable[[dict], None]] = None) -> List[ParsedConfig]:
         # Global cap on simultaneous delay probes (accuracy, see __init__).
         self._measure_sem = asyncio.Semaphore(self.measure_concurrency)
+
+        # Reset live-progress state for this run.
+        self._progress_cb = progress_cb
+        self._total = len(configs)
+        self._tested = 0
+        self._alive = 0
+        self._recent = []
+        self._last_emit = 0.0
 
         batches = [configs[i:i + self.batch_size] for i in range(0, len(configs), self.batch_size)]
         sem = asyncio.Semaphore(self.parallel_batches)
@@ -113,9 +130,41 @@ class Tester:
             if isinstance(o, BaseException):
                 log.warning("a test batch failed (skipped): %r", o)
 
+        self._emit_progress(force=True)
         alive = [c for sub in results if sub for c in sub]
         alive.sort(key=lambda c: c.ping)
         return alive
+
+    def _record(self, result: Optional[ParsedConfig]) -> None:
+        """Update live counters after a single config has been probed."""
+        self._tested += 1
+        if result is not None:
+            self._alive += 1
+            self._recent.append({
+                "address": result.address,
+                "port": result.port,
+                "protocol": result.protocol,
+                "ping": result.ping,
+            })
+            self._recent = self._recent[-30:]  # keep the tail only
+        self._emit_progress()
+
+    def _emit_progress(self, force: bool = False) -> None:
+        if self._progress_cb is None:
+            return
+        now = time.monotonic()
+        if not force and (now - self._last_emit) < 0.8:
+            return  # throttle to ~1 write/sec so we don't thrash the disk
+        self._last_emit = now
+        try:
+            self._progress_cb({
+                "tested": self._tested,
+                "total": self._total,
+                "alive": self._alive,
+                "recent": list(self._recent),
+            })
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ #
     async def _run_batch(self, batch: List[ParsedConfig], port_base: int) -> List[ParsedConfig]:
@@ -224,26 +273,30 @@ class Tester:
         assert self._measure_sem is not None
         async with self._measure_sem:
             connector = None
+            result: Optional[ParsedConfig] = None
             try:
                 connector = ProxyConnector.from_url(f"socks5://127.0.0.1:{port}")
                 timeout = aiohttp.ClientTimeout(total=self.probe_timeout)
                 best: Optional[int] = None
+                ok = True
                 async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
                     for _ in range(self.ping_samples):
                         start = time.monotonic()
                         async with session.get(self.test_url, allow_redirects=False) as resp:
                             await resp.read()
                             if resp.status not in self.expected:
-                                return None  # wrong response -> not usable, bail now
+                                ok = False  # wrong response -> not usable
+                                break
                         ping = int((time.monotonic() - start) * 1000)
                         if best is None or ping < best:
                             best = ping
-                if best is None or best <= 0 or best > self.max_ping:
-                    return None
-                cfg.ping = best
-                return cfg
+                if ok and best is not None and 0 < best <= self.max_ping:
+                    cfg.ping = best
+                    result = cfg
             except Exception:
-                return None
+                result = None
             finally:
                 if connector is not None:
                     await connector.close()
+                self._record(result)
+            return result

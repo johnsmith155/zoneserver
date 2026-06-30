@@ -31,7 +31,7 @@ from pathlib import Path
 from aiohttp import web
 
 from . import config as cfgmod
-from . import gist, sign, state
+from . import gist, links, sign, state
 
 log = logging.getLogger("zonevpn.dashboard")
 
@@ -64,7 +64,9 @@ def _tail(path: Path, n: int) -> str:
 def _republish_without(deleted_key: str) -> tuple[bool, str]:
     """Rebuild the payload from the local snapshot minus the deleted server and
     push it to the gist now, so the app stops seeing it immediately."""
-    cfg = cfgmod.load()
+    cfg, cfg_err = cfgmod.load_lenient()
+    if cfg_err:
+        return False, f"config.json is broken: {cfg_err}"
     if not cfg.get("github_token") or not cfg.get("gist_id"):
         return False, "github_token/gist_id not configured"
 
@@ -111,14 +113,48 @@ async def index(_request: web.Request) -> web.Response:
     return web.Response(text=_HTML, content_type="text/html")
 
 
-async def api_status(_request: web.Request) -> web.Response:
+async def api_status(request: web.Request) -> web.Response:
     return web.json_response({
         "status": state.read_status(),
         "servers": state.read_servers(),
         "blocklist": state.load_blocklist(),
+        "manual": state.read_manual(),
+        "progress": state.read_progress(),
         "service": _service_active(),
+        "config_error": request.app.get("config_error"),
         "now": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     })
+
+
+async def api_add(request: web.Request) -> web.Response:
+    """Add a server by share link. It's parsed/validated, stored, and picked up
+    (tested + published if it's actually fast) on the next cycle."""
+    body = await request.json()
+    link = (body.get("link") or "").strip()
+    if not link:
+        return web.json_response({"error": "link required"}, status=400)
+    parsed = links.parse_link(link)
+    if parsed is None:
+        return web.json_response(
+            {"ok": False,
+             "message": "unrecognized link (need vmess/vless/trojan/ss://)"},
+            status=400)
+    manual = state.add_manual(link)
+    return web.json_response({
+        "ok": True,
+        "message": f"added {parsed.protocol} {parsed.address}:{parsed.port} — "
+                   f"it will be tested on the next cycle",
+        "count": len(manual),
+    })
+
+
+async def api_remove_manual(request: web.Request) -> web.Response:
+    body = await request.json()
+    link = (body.get("link") or "").strip()
+    if not link:
+        return web.json_response({"error": "link required"}, status=400)
+    state.remove_manual(link)
+    return web.json_response({"ok": True})
 
 
 async def api_logs(request: web.Request) -> web.Response:
@@ -159,15 +195,18 @@ async def api_update(_request: web.Request) -> web.Response:
         return web.json_response({"ok": False, "message": str(exc)}, status=500)
 
 
-def build_app(token: str) -> web.Application:
+def build_app(token: str, config_error: str | None = None) -> web.Application:
     app = web.Application(middlewares=[_auth])
     app["token"] = token
+    app["config_error"] = config_error
     app.add_routes([
         web.get("/", index),
         web.get("/api/status", api_status),
         web.get("/api/logs", api_logs),
         web.post("/api/delete", api_delete),
         web.post("/api/restore", api_restore),
+        web.post("/api/add", api_add),
+        web.post("/api/remove_manual", api_remove_manual),
         web.post("/api/update", api_update),
     ])
     return app
@@ -179,17 +218,22 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    cfg = cfgmod.load()
+    # Lenient load: even if config.json is broken, still bring the console up so
+    # the operator can see the error + logs and fix it (best-effort token).
+    cfg, cfg_err = cfgmod.load_lenient()
     host = cfg.get("dashboard_host", "0.0.0.0")
     port = int(cfg.get("dashboard_port", 8787))
     token = str(cfg.get("dashboard_token", "") or "")
     state.ensure_dir()
+    if cfg_err:
+        log.error("config.json problem: %s — running in LIMITED mode "
+                  "(publish/delete disabled until fixed)", cfg_err)
     if not token:
         log.warning("dashboard_token is empty — the dashboard is UNAUTHENTICATED. "
                     "Set dashboard_token in config.json or firewall the port.")
     log.info("ZoneVPN dashboard on http://%s:%d  (token %s)",
              host, port, "required" if token else "DISABLED")
-    web.run_app(build_app(token), host=host, port=port, print=None)
+    web.run_app(build_app(token, cfg_err), host=host, port=port, print=None)
 
 
 _HTML = r"""<!doctype html>
@@ -242,6 +286,16 @@ _HTML = r"""<!doctype html>
     font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:#bcd0ea;background:var(--panel2)}
   .row{display:flex;gap:10px;align-items:center;padding:12px 16px;border-top:1px solid var(--stroke)}
   .muted{color:var(--txt3)} .right{margin-left:auto}
+  .banner{background:#3a1620;border:1px solid #5e2330;color:#ffb4bd;padding:12px 16px;
+    border-radius:12px;margin-bottom:16px;font-weight:600;font-size:13px}
+  .v2{font-size:18px;font-weight:700;margin-top:4px}
+  .bar{height:5px;background:#1e2638;border-radius:3px;overflow:hidden;margin:0 16px 12px}
+  .bar > i{display:block;height:100%;width:0;background:linear-gradient(90deg,#6d5efc,#27d4a8);transition:width .4s}
+  .addrow{display:flex;gap:10px;padding:12px 16px;border-top:1px solid var(--stroke)}
+  .addrow input{flex:1;background:var(--panel2);border:1px solid var(--stroke);color:var(--txt);
+    padding:9px 12px;border-radius:10px;font-size:13px;font-family:ui-monospace,monospace}
+  #feed{margin:0;padding:12px 16px;max-height:170px;overflow:auto;white-space:pre-wrap;
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:#bcd0ea;background:var(--panel2)}
   .toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);background:#121a2c;
     border:1px solid var(--stroke);padding:12px 18px;border-radius:12px;opacity:0;transition:.25s;pointer-events:none}
   .toast.show{opacity:1}
@@ -259,6 +313,21 @@ _HTML = r"""<!doctype html>
     </span>
   </header>
 
+  <div id="cfgErr" class="banner" style="display:none"></div>
+
+  <div class="panel" style="margin-bottom:18px">
+    <h2>Current cycle <span class="sub" id="cyPhase">…</span>
+      <span class="right muted" id="cyThreads"></span></h2>
+    <div class="row" style="border-top:0;flex-wrap:wrap;gap:26px">
+      <div><div class="k">Collected</div><div class="v2" id="cyCollected">–</div></div>
+      <div><div class="k">Reachable (TCP)</div><div class="v2" id="cyReachable">–</div></div>
+      <div><div class="k">Tested</div><div class="v2" id="cyTested">–</div></div>
+      <div><div class="k">Alive</div><div class="v2" id="cyAlive">–</div></div>
+    </div>
+    <div class="bar"><i id="cyBar"></i></div>
+    <pre id="feed">(no live results yet)</pre>
+  </div>
+
   <div class="cards">
     <div class="card"><div class="k">Published</div><div class="v" id="cCount">–</div></div>
     <div class="card"><div class="k">Last cycle</div><div class="v" id="cUpdated">–</div></div>
@@ -270,6 +339,10 @@ _HTML = r"""<!doctype html>
     <div class="panel">
       <h2>Servers <span class="sub" id="sCount"></span>
         <button class="btn right" onclick="refresh()">Reload</button></h2>
+      <div class="addrow">
+        <input id="addLink" placeholder="Paste vmess:// vless:// trojan:// ss:// link to add a server"/>
+        <button class="btn primary" onclick="addServer()">+ Add</button>
+      </div>
       <div class="tablewrap">
         <table>
           <thead><tr><th>#</th><th>Server</th><th>Host : Port</th><th>Country</th><th>Ping</th><th>Proto</th><th></th></tr></thead>
@@ -326,13 +399,48 @@ async function refresh(){
       </tr>`;}).join('');
     $('rows').innerHTML = rows || '<tr><td colspan=7 class=muted>No servers yet — wait for the next cycle.</td></tr>';
     $('sCount').textContent = (d.servers?d.servers.length:0)+' published'
+      + (d.manual&&d.manual.length?(' · '+d.manual.length+' manual'):'')
       + (d.blocklist&&d.blocklist.length?(' · '+d.blocklist.length+' blocked'):'');
+
+    // config error banner
+    const ce=$('cfgErr');
+    if(d.config_error){ce.style.display='block';
+      ce.textContent='⚠ config.json problem: '+d.config_error+
+        '  — fix it, then: systemctl restart zonevpn zonevpn-dashboard';}
+    else{ce.style.display='none';}
+
+    // current cycle (live)
+    const pr=d.progress||{}, th=pr.threads||{};
+    $('cyPhase').textContent=(pr.active?'▶ ':'')+(pr.phase||'idle');
+    $('cyThreads').textContent= th.measure_concurrency!=null
+      ? ('threads: '+th.measure_concurrency+' probes · '+th.parallel_batches+' batches × '+th.batch_size)
+      : '';
+    $('cyCollected').textContent = pr.collected ?? '–';
+    $('cyReachable').textContent = pr.reachable ?? '–';
+    $('cyTested').textContent = (pr.tested!=null?pr.tested:'–')+(pr.total?(' / '+pr.total):'');
+    $('cyAlive').textContent = pr.alive ?? '–';
+    const pct = pr.total? Math.min(100,Math.round((pr.tested||0)/pr.total*100)) : 0;
+    $('cyBar').style.width = pct+'%';
+    const feed=(pr.recent||[]).slice().reverse()
+      .map(r=>`${String(r.ping).padStart(4)} ms   ${r.address}:${r.port}  (${r.protocol})`).join('\n');
+    $('feed').textContent = feed || '(no live results yet)';
   }catch(e){toast('status failed');}
+}
+
+async function addServer(){
+  const el=$('addLink'); const link=(el.value||'').trim();
+  if(!link){toast('paste a vmess/vless/trojan/ss link first');return;}
+  try{const r=await fetch('/api/add',{method:'POST',
+      headers:{'Content-Type':'application/json',...H},body:JSON.stringify({link})});
+    const d=await r.json();
+    toast(d.ok?('Added · '+d.message):('Add failed · '+(d.message||d.error)));
+    if(d.ok){el.value='';refresh();}}
+  catch(e){toast('add failed');}
 }
 
 async function loadLog(){
   if(!$('autolog').checked) return;
-  try{const r=await fetch('/api/logs?n=400',{headers:H});const d=await r.json();
+  try{const r=await fetch('/api/logs?n=1500',{headers:H});const d=await r.json();
     const el=$('log');const stick=el.scrollTop+el.clientHeight>=el.scrollHeight-30;
     el.textContent=d.log||'';if(stick)el.scrollTop=el.scrollHeight;}catch(e){}
 }

@@ -32,6 +32,8 @@ STATE_DIR = ROOT / "state"
 STATUS_FILE = STATE_DIR / "status.json"
 SERVERS_FILE = STATE_DIR / "servers.json"
 BLOCKLIST_FILE = STATE_DIR / "blocklist.json"
+PROGRESS_FILE = STATE_DIR / "progress.json"
+MANUAL_FILE = STATE_DIR / "manual.json"
 LOG_FILE = STATE_DIR / "zonevpn.log"
 
 
@@ -118,3 +120,38 @@ def write_servers(servers: List[dict]) -> None:
 def read_servers() -> List[dict]:
     data = _read_json(SERVERS_FILE, [])
     return data if isinstance(data, list) else []
+
+
+# --------------------------------------------------------------------------- #
+# live cycle progress (written continuously while a cycle runs)                #
+# --------------------------------------------------------------------------- #
+def write_progress(progress: dict) -> None:
+    _atomic_write(PROGRESS_FILE, json.dumps(progress, ensure_ascii=False))
+
+
+def read_progress() -> dict:
+    data = _read_json(PROGRESS_FILE, {})
+    return data if isinstance(data, dict) else {}
+
+
+# --------------------------------------------------------------------------- #
+# manual servers (added from the dashboard, tested every cycle like the rest)  #
+# --------------------------------------------------------------------------- #
+def read_manual() -> List[str]:
+    data = _read_json(MANUAL_FILE, [])
+    return [s for s in data if isinstance(s, str)] if isinstance(data, list) else []
+
+
+def add_manual(link: str) -> List[str]:
+    link = (link or "").strip()
+    links = read_manual()
+    if link and link not in links:
+        links.append(link)
+        _atomic_write(MANUAL_FILE, json.dumps(links, ensure_ascii=False, indent=2))
+    return links
+
+
+def remove_manual(link: str) -> List[str]:
+    links = [s for s in read_manual() if s != link]
+    _atomic_write(MANUAL_FILE, json.dumps(links, ensure_ascii=False, indent=2))
+    return links

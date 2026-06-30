@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime, timezone
 from typing import List
 
 from . import config as cfgmod
@@ -16,6 +17,41 @@ from .tester import Tester
 log = logging.getLogger("zonevpn.runner")
 
 
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _progress(phase: str, active: bool = True, **extra) -> None:
+    """Write the live cycle progress the dashboard polls. Best-effort."""
+    try:
+        state.write_progress({"phase": phase, "active": active,
+                              "updated_at": _now_iso(), **extra})
+    except Exception:
+        pass
+
+
+def _merge_manual(configs: List[ParsedConfig]) -> List[ParsedConfig]:
+    """Append operator-added servers (from the dashboard) and de-dup."""
+    manual = state.read_manual()
+    if not manual:
+        return configs
+    seen = {links.dedup_key(c) for c in configs}
+    added = 0
+    for raw in manual:
+        parsed = links.parse_link(raw)
+        if parsed is None:
+            continue
+        key = links.dedup_key(parsed)
+        if key in seen:
+            continue
+        seen.add(key)
+        configs.append(parsed)
+        added += 1
+    if added:
+        log.info("manual servers: added %d from the dashboard", added)
+    return configs
+
+
 async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
     t0 = time.monotonic()
     test_cfg = cfg.get("test", {})
@@ -23,11 +59,22 @@ async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
     # allowInsecure in TLS outbounds (needs an xray build that still supports it)
     links.ALLOW_INSECURE = bool(test_cfg.get("tls_allow_insecure", False))
 
+    # Concurrency knobs, surfaced to the dashboard as the active "threads".
+    threads = {
+        "parallel_batches": int(test_cfg.get("parallel_batches", 4)),
+        "measure_concurrency": int(test_cfg.get("measure_concurrency", 32)),
+        "batch_size": int(test_cfg.get("batch_size", 100)),
+    }
+
     # 1. collect
+    _progress("collecting", threads=threads)
     configs = await sources.collect(cfg.get("sources", []))
+    configs = _merge_manual(configs)
     if not configs:
         log.warning("no configs collected; skipping cycle")
+        _progress("idle", active=False)
         return False
+    collected = len(configs)
 
     # 1b. drop anything the operator deleted from the dashboard (by address:port)
     blocked = set(state.load_blocklist())
@@ -47,6 +94,7 @@ async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
 
     # 2. cheap TCP pre-filter (huge win at this scale, especially from Iran)
     if test_cfg.get("tcp_prefilter", True):
+        _progress("prefilter", threads=threads, collected=collected)
         before = len(configs)
         configs = await tester.tcp_prefilter(
             configs,
@@ -57,14 +105,23 @@ async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
                  before, len(configs), time.monotonic() - t0)
         if not configs:
             log.warning("nothing reachable over TCP; skipping cycle")
+            _progress("idle", active=False)
             return False
+    reachable = len(configs)
 
-    # 3. real-delay test through xray
-    alive = await tester.run(configs)
+    # 3. real-delay test through xray (live progress -> dashboard)
+    def _on_test_progress(snap: dict) -> None:
+        _progress("testing", threads=threads, collected=collected,
+                  reachable=reachable, **snap)
+
+    _progress("testing", threads=threads, collected=collected,
+              reachable=reachable, tested=0, total=reachable, alive=0, recent=[])
+    alive = await tester.run(configs, progress_cb=_on_test_progress)
     log.info("alive after testing: %d / %d (%.1fs)",
-             len(alive), len(configs), time.monotonic() - t0)
+             len(alive), reachable, time.monotonic() - t0)
     if not alive:
         log.warning("no config passed the test; not publishing")
+        _progress("idle", active=False)
         return False
 
     # 4. publish only genuinely fast servers (real delay under the threshold).
@@ -75,6 +132,7 @@ async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
         log.info("fast filter (<=%dms): %d -> %d", publish_max_ping, before, len(alive))
         if not alive:
             log.warning("no server under %dms; not publishing", publish_max_ping)
+            _progress("idle", active=False)
             return False
 
     # 5. geo annotate (only the survivors -> cheap)
@@ -88,6 +146,8 @@ async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
         alive = _trim(alive, max_out, int(test_cfg.get("min_per_country", 0) or 0))
 
     # 7. build payload + publish
+    _progress("publishing", threads=threads, collected=collected,
+              reachable=reachable, alive=len(alive))
     payload = build_output(alive, cfg.get("name_prefix", "zone-vpn"))
     sign_key = sign.load_private_key(cfg)  # None unless configured -> opt-in
     ok = gist.publish(
@@ -106,6 +166,8 @@ async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
     # 8. snapshot local state for the dashboard (decoded list + stats)
     _write_state(alive, payload, ok, bool(sign_key),
                  bool(cfg.get("gist_base64", True)), time.monotonic() - t0)
+    _progress("idle", active=False, published=payload.get("count", len(alive)),
+              duration_s=round(time.monotonic() - t0, 1))
     return ok
 
 
