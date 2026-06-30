@@ -36,6 +36,29 @@ class Tester:
         self.base_port: int = int(cfg.get("base_port", 20000))
         self.max_ping: int = int(cfg.get("max_ping", 3000))
 
+        # ACCURACY-CRITICAL: how many delay measurements may run *at the same
+        # instant* across ALL batches. The batches spin up thousands of proxies
+        # cheaply, but if we fire all of their HTTP probes at once the CPU/NIC
+        # saturate and every ping is wrong (a 100ms server looks like 2000ms).
+        # Capping in-flight probes keeps each measurement uncontended -> real
+        # pings -> the *actually fastest* servers get published. Lower = more
+        # accurate but slower; this is the knob behind "test 6 at a time".
+        self.measure_concurrency: int = int(cfg.get("measure_concurrency", 32))
+        # Probe each surviving config a few times over a kept-alive connection
+        # and keep the MIN (the warm round-trip), so a one-off TLS-handshake
+        # spike doesn't misrank a good server. Dead configs fail on probe #1 and
+        # never pay for extra samples.
+        self.ping_samples: int = max(1, int(cfg.get("ping_samples", 2)))
+
+        # Bound the wait per probe so a hanging server can't stall the cycle:
+        # nothing slower than max_ping can win anyway, so don't wait much past it.
+        self.probe_timeout: float = min(
+            self.timeout, self.max_ping / 1000.0 + 1.0
+        )
+
+        # Created in run(), bound to the running event loop.
+        self._measure_sem: Optional[asyncio.Semaphore] = None
+
     async def tcp_prefilter(self, configs: List[ParsedConfig],
                             timeout: float, concurrency: int) -> List[ParsedConfig]:
         """Cheaply drop servers that don't even accept a TCP connection.
@@ -65,6 +88,9 @@ class Tester:
         return [c for c in results if c is not None]
 
     async def run(self, configs: List[ParsedConfig]) -> List[ParsedConfig]:
+        # Global cap on simultaneous delay probes (accuracy, see __init__).
+        self._measure_sem = asyncio.Semaphore(self.measure_concurrency)
+
         batches = [configs[i:i + self.batch_size] for i in range(0, len(configs), self.batch_size)]
         sem = asyncio.Semaphore(self.parallel_batches)
         results: List[List[ParsedConfig]] = [None] * len(batches)  # type: ignore
@@ -79,7 +105,13 @@ class Tester:
         for idx, batch in enumerate(batches):
             slot = idx % self.parallel_batches
             tasks.append(asyncio.create_task(worker(slot, idx, batch)))
-        await asyncio.gather(*tasks)
+        # return_exceptions=True so one batch blowing up (e.g. the OS refusing a
+        # new xray process under load) loses only that batch, not the whole
+        # cycle. The good batches still publish.
+        outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+        for o in outcomes:
+            if isinstance(o, BaseException):
+                log.warning("a test batch failed (skipped): %r", o)
 
         alive = [c for sub in results if sub for c in sub]
         alive.sort(key=lambda c: c.ping)
@@ -187,23 +219,31 @@ class Tester:
         return False
 
     async def _test_one(self, port: int, cfg: ParsedConfig) -> Optional[ParsedConfig]:
-        connector = None
-        try:
-            connector = ProxyConnector.from_url(f"socks5://127.0.0.1:{port}")
-            timeout = aiohttp.ClientTimeout(total=self.timeout)
-            start = time.monotonic()
-            async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-                async with session.get(self.test_url, allow_redirects=False) as resp:
-                    await resp.read()
-                    if resp.status not in self.expected:
-                        return None
-            ping = int((time.monotonic() - start) * 1000)
-            if ping <= 0 or ping > self.max_ping:
+        # Global throttle: only `measure_concurrency` probes run at once, so each
+        # measured ping reflects the server's real latency, not server load.
+        assert self._measure_sem is not None
+        async with self._measure_sem:
+            connector = None
+            try:
+                connector = ProxyConnector.from_url(f"socks5://127.0.0.1:{port}")
+                timeout = aiohttp.ClientTimeout(total=self.probe_timeout)
+                best: Optional[int] = None
+                async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+                    for _ in range(self.ping_samples):
+                        start = time.monotonic()
+                        async with session.get(self.test_url, allow_redirects=False) as resp:
+                            await resp.read()
+                            if resp.status not in self.expected:
+                                return None  # wrong response -> not usable, bail now
+                        ping = int((time.monotonic() - start) * 1000)
+                        if best is None or ping < best:
+                            best = ping
+                if best is None or best <= 0 or best > self.max_ping:
+                    return None
+                cfg.ping = best
+                return cfg
+            except Exception:
                 return None
-            cfg.ping = ping
-            return cfg
-        except Exception:
-            return None
-        finally:
-            if connector is not None:
-                await connector.close()
+            finally:
+                if connector is not None:
+                    await connector.close()

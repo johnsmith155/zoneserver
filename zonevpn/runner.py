@@ -67,17 +67,27 @@ async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
         log.warning("no config passed the test; not publishing")
         return False
 
-    # 4. geo annotate (only the survivors -> cheap)
+    # 4. publish only genuinely fast servers (real delay under the threshold).
+    publish_max_ping = int(test_cfg.get("publish_max_ping", 800) or 0)
+    if publish_max_ping > 0:
+        before = len(alive)
+        alive = [c for c in alive if 0 < c.ping <= publish_max_ping]
+        log.info("fast filter (<=%dms): %d -> %d", publish_max_ping, before, len(alive))
+        if not alive:
+            log.warning("no server under %dms; not publishing", publish_max_ping)
+            return False
+
+    # 5. geo annotate (only the survivors -> cheap)
     cc_map = await geo.annotate([c.address for c in alive])
     for c in alive:
         c.country = cc_map.get(c.address, "")
 
-    # 5. trim
+    # 6. trim
     max_out = int(test_cfg.get("max_output", 0) or 0)
     if max_out and len(alive) > max_out:
         alive = _trim(alive, max_out, int(test_cfg.get("min_per_country", 0) or 0))
 
-    # 6. build payload + publish
+    # 7. build payload + publish
     payload = build_output(alive, cfg.get("name_prefix", "zone-vpn"))
     sign_key = sign.load_private_key(cfg)  # None unless configured -> opt-in
     ok = gist.publish(
@@ -93,7 +103,7 @@ async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
     else:
         log.error("gist publish failed")
 
-    # 7. snapshot local state for the dashboard (decoded list + stats)
+    # 8. snapshot local state for the dashboard (decoded list + stats)
     _write_state(alive, payload, ok, bool(sign_key),
                  bool(cfg.get("gist_base64", True)), time.monotonic() - t0)
     return ok

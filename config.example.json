@@ -19,7 +19,8 @@
 
   "name_prefix": "zone-vpn",
 
-  "interval_minutes": 10,
+  "_interval_comment": "How often a full collect/test/publish cycle starts. 60 = once an hour, as designed. Cycles never overlap: if one runs long, the next starts right after it finishes.",
+  "interval_minutes": 60,
 
   "_dashboard_comment": "Local web console (logs, server table, delete, update). install.sh fills in a random dashboard_token. Open http://SERVER_IP:8787/?token=THE_TOKEN. Empty token = no auth (only behind a firewall/SSH tunnel).",
   "dashboard_host": "0.0.0.0",
@@ -42,7 +43,15 @@
     "batch_size": 100,
     "parallel_batches": 4,
     "base_port": 20000,
-    "max_ping": 3000,
+    "max_ping": 1500,
+
+    "_publish_comment": "Only servers whose real measured delay is <= publish_max_ping (ms) are published to the gist. Keeps the app's list genuinely fast. max_ping is the looser test-time cutoff (kept a little above publish_max_ping so a borderline server's warm sample can still qualify); publish_max_ping is the strict publish cutoff that actually decides what ships.",
+    "publish_max_ping": 800,
+
+    "_accuracy_comment": "measure_concurrency caps how many delay probes run at once across ALL batches. This is what keeps pings ACCURATE: too high saturates the server and every ping is wrong. 24-48 is a good range on a normal VPS; lower = more accurate but slower. ping_samples re-probes each survivor and keeps the fastest (min) so a one-off spike doesn't misrank a good server.",
+    "measure_concurrency": 32,
+    "ping_samples": 2,
+
     "max_configs_to_test": 0,
     "max_output": 300,
     "min_per_country": 0
