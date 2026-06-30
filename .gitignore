@@ -8,3 +8,6 @@ vertest/
 __pycache__/
 *.pyc
 .env
+
+# Local runtime state (status snapshot, blocklist, logs) — must survive updates
+state/

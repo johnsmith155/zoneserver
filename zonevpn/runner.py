@@ -7,7 +7,7 @@ import time
 from typing import List
 
 from . import config as cfgmod
-from . import gist, links, sign, sources
+from . import gist, links, sign, sources, state
 from .geo import GeoResolver
 from .links import ParsedConfig
 from .rename import build_output
@@ -28,6 +28,15 @@ async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
     if not configs:
         log.warning("no configs collected; skipping cycle")
         return False
+
+    # 1b. drop anything the operator deleted from the dashboard (by address:port)
+    blocked = set(state.load_blocklist())
+    if blocked:
+        before = len(configs)
+        configs = [c for c in configs
+                   if state.block_key(c.address, c.port) not in blocked]
+        if before != len(configs):
+            log.info("blocklist: dropped %d server(s)", before - len(configs))
 
     limit = int(test_cfg.get("max_configs_to_test", 0) or 0)
     if limit and len(configs) > limit:
@@ -83,7 +92,33 @@ async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
                  payload["count"], cfg["gist_id"], time.monotonic() - t0)
     else:
         log.error("gist publish failed")
+
+    # 7. snapshot local state for the dashboard (decoded list + stats)
+    _write_state(alive, payload, ok, bool(sign_key),
+                 bool(cfg.get("gist_base64", True)), time.monotonic() - t0)
     return ok
+
+
+def _write_state(final: List[ParsedConfig], payload: dict, ok: bool,
+                 signed: bool, base64_encoded: bool, duration_s: float) -> None:
+    """Persist a decoded snapshot so the dashboard can show readable rows and
+    offer per-server delete (the gist itself is base64/obfuscated)."""
+    try:
+        servers = []
+        for parsed, item in zip(final, payload.get("configs", [])):
+            servers.append({**item,
+                            "block_key": state.block_key(parsed.address, parsed.port)})
+        state.write_servers(servers)
+        state.write_status({
+            "updated_at": payload.get("updated_at"),
+            "count": payload.get("count", len(servers)),
+            "published_ok": ok,
+            "signed": signed,
+            "base64": base64_encoded,
+            "duration_s": round(duration_s, 1),
+        })
+    except Exception:
+        log.exception("failed to write dashboard state (non-fatal)")
 
 
 def _trim(alive: List[ParsedConfig], max_out: int, min_per_country: int) -> List[ParsedConfig]:

@@ -12,6 +12,7 @@ set -euo pipefail
 # --------------------------------------------------------------------------- #
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVICE_NAME="zonevpn"
+DASH_NAME="zonevpn-dashboard"
 RUN_USER="${SUDO_USER:-$(whoami)}"
 
 say() { printf "\n\033[1;36m==> %s\033[0m\n" "$*"; }
@@ -85,6 +86,38 @@ else
 fi
 
 # --------------------------------------------------------------------------- #
+# Make sure the dashboard has a token (generate one if missing) and ensure the
+# dashboard_* keys exist in config.json regardless of how it was created.
+say "Configuring the dashboard ..."
+DASH_TOKEN="$("$APP_DIR/venv/bin/python" - "$APP_DIR/config.json" <<'PY'
+import json, secrets, sys
+p = sys.argv[1]
+try:
+    with open(p, encoding="utf-8") as fh: cfg = json.load(fh)
+except Exception: cfg = {}
+cfg.setdefault("dashboard_host", "0.0.0.0")
+cfg.setdefault("dashboard_port", 8787)
+if not cfg.get("dashboard_token"):
+    cfg["dashboard_token"] = secrets.token_urlsafe(18)
+with open(p, "w", encoding="utf-8") as fh: json.dump(cfg, fh, indent=2, ensure_ascii=False)
+print(cfg["dashboard_token"])
+PY
+)"
+chown "$RUN_USER":"$RUN_USER" "$APP_DIR/config.json"
+chmod 600 "$APP_DIR/config.json"
+mkdir -p "$APP_DIR/state"
+chown -R "$RUN_USER":"$RUN_USER" "$APP_DIR/state"
+
+# Allow the (non-root) dashboard user to run the hard-update script via sudo
+# without a password — scoped to exactly that one script.
+say "Installing sudoers rule for the Update button ..."
+cat > "/etc/sudoers.d/zonevpn" <<EOF
+${RUN_USER} ALL=(root) NOPASSWD: ${APP_DIR}/update.sh
+EOF
+chmod 440 "/etc/sudoers.d/zonevpn"
+chmod +x "$APP_DIR/update.sh"
+
+# --------------------------------------------------------------------------- #
 say "Installing systemd service ..."
 cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
 [Unit]
@@ -107,11 +140,46 @@ LimitNOFILE=1048576
 WantedBy=multi-user.target
 EOF
 
+say "Installing dashboard systemd service ..."
+cat > "/etc/systemd/system/${DASH_NAME}.service" <<EOF
+[Unit]
+Description=ZoneVPN server dashboard (logs / servers / update)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${RUN_USER}
+WorkingDirectory=${APP_DIR}
+ExecStart=${APP_DIR}/venv/bin/python -m zonevpn.dashboard
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 systemctl daemon-reload
-systemctl enable "${SERVICE_NAME}"
+systemctl enable "${SERVICE_NAME}" "${DASH_NAME}"
 systemctl restart "${SERVICE_NAME}"
+systemctl restart "${DASH_NAME}"
+
+# Best-effort: open the dashboard port if ufw is active.
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+  DASH_PORT="$("$APP_DIR/venv/bin/python" -c "import json;print(json.load(open('$APP_DIR/config.json')).get('dashboard_port',8787))" 2>/dev/null || echo 8787)"
+  ufw allow "${DASH_PORT}/tcp" >/dev/null 2>&1 || true
+fi
+
+IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+DASH_PORT="$("$APP_DIR/venv/bin/python" -c "import json;print(json.load(open('$APP_DIR/config.json')).get('dashboard_port',8787))" 2>/dev/null || echo 8787)"
 
 say "Done!"
-echo "  Status :  systemctl status ${SERVICE_NAME}"
-echo "  Logs   :  journalctl -u ${SERVICE_NAME} -f"
-echo "  Edit   :  ${APP_DIR}/venv/bin/python setup_wizard.py   (then: systemctl restart ${SERVICE_NAME})"
+echo "  Collector status :  systemctl status ${SERVICE_NAME}"
+echo "  Dashboard status :  systemctl status ${DASH_NAME}"
+echo "  Logs             :  journalctl -u ${SERVICE_NAME} -f"
+echo "  Edit config      :  ${APP_DIR}/venv/bin/python setup_wizard.py   (then: systemctl restart ${SERVICE_NAME})"
+echo ""
+echo "  ┌─ Dashboard ────────────────────────────────────────────────"
+echo "  │  http://${IP:-SERVER_IP}:${DASH_PORT}/?token=${DASH_TOKEN}"
+echo "  │  (token is saved in config.json as dashboard_token)"
+echo "  └────────────────────────────────────────────────────────────"

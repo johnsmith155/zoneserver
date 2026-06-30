@@ -37,13 +37,25 @@ sources.collect()        # دانلود لینک‌ها از URLهای config، 
 | `rename.py` | ساخت نام نمایشی نهایی (`zone-vpn-xxxxx` + پرچم) و اسمبل payload خروجی. |
 | `gist.py` | ایجاد/آپدیت گیست. `publish()` بین سه حالت انتخاب می‌کند: امضا‌شدهٔ Ed25519 (اولویت اول) > base64 > JSON خوانا. |
 | `sign.py` | امضای Ed25519 برای ضد جعل بودن لیست منتشرشده (جزئیات زیر). |
-| `runner.py` | اورکستریشن کل سیکل (`run_cycle`) + منطق trim کردن نتایج. |
+| `runner.py` | اورکستریشن کل سیکل (`run_cycle`) + منطق trim + فیلتر blocklist + نوشتن state. |
+| `state.py` | state محلی مشترک بین collector و dashboard: `status.json`, `servers.json` (لیست دیکدشده + `block_key`)، `blocklist.json`، `zonevpn.log`. |
+| `dashboard.py` | کنسول وب aiohttp (پورت `dashboard_port`، پیش‌فرض 8787): وضعیت، لاگ زنده، جدول سرورها، دکمهٔ Delete (blocklist + ری‌پابلیش فوری)، دکمهٔ Update. احراز هویت با `dashboard_token`. |
+
+## داشبورد و آپدیت سرور
+- **داشبورد**: سرویس systemd جدا `zonevpn-dashboard`. باز کردن `http://SERVER_IP:8787/?token=...`.
+  - لاگ زنده از `state/zonevpn.log` (هندلر RotatingFile در `__main__.py`).
+  - جدول سرورها از `state/servers.json` (که هر سیکل نوشته می‌شود) — حتی با gist بیس‌۶۴ هم خوانا نمایش داده می‌شود.
+  - **Delete**: `block_key` (یعنی `address:port`، پایدار بین سیکل‌ها) را به `state/blocklist.json` اضافه می‌کند و فوراً gist را بدون آن سرور دوباره منتشر می‌کند. runner هر سیکل blocklist را فیلتر می‌کند.
+  - **Update**: `update.sh` را با `sudo -n` اجرا می‌کند (sudoers محدود به همان اسکریپت در `/etc/sudoers.d/zonevpn`).
+- **`update.sh`** (هارد آپدیت): توقف سرویس → `git fetch` + `git reset --hard origin/main` → در صورت تغییر `requirements.txt` نصب مجدد deps → restart هر دو سرویس. `config.json`، `state/`، `bin/`, `*.mmdb` چون gitignore هستند حفظ می‌شوند؛ سیکل از سر گرفته می‌شود.
+- راهنمای قدم‌به‌قدم آپدیت در [SERVER_UPDATE.md](SERVER_UPDATE.md).
 
 ## فایل‌های ریشه
 - `setup_wizard.py` — ویزارد تعاملی که `config.json` را می‌سازد (توکن گیت‌هاب، gist id، منابع، تنظیمات تست) با مجوز `600`.
 - `generate_keys.py` — اسکریپت یک‌باره برای تولید جفت‌کلید Ed25519 (امضای گیست).
-- `install.sh` — نصب‌کنندهٔ Debian/Ubuntu: نصب وابستگی‌ها، venv، دانلود نسخهٔ پین‌شدهٔ xray-core (v25.12.8، برای پشتیبانی `allowInsecure`)، دانلود GeoIP db، اجرای ویزارد، ساخت/فعال‌سازی سرویس systemd.
-- `config.example.json` — تمپلیت تنظیمات.
+- `install.sh` — نصب‌کنندهٔ Debian/Ubuntu: نصب وابستگی‌ها، venv، دانلود نسخهٔ پین‌شدهٔ xray-core (v25.12.8، برای پشتیبانی `allowInsecure`)، دانلود GeoIP db، اجرای ویزارد، تولید `dashboard_token`، sudoers، و ساخت/فعال‌سازی دو سرویس systemd (`zonevpn` + `zonevpn-dashboard`).
+- `update.sh` — اسکریپت هارد آپدیت (بالا).
+- `config.example.json` — تمپلیت تنظیمات (شامل کلیدهای `dashboard_*`).
 
 ## ویژگی امنیتی: امضای Ed25519 (اختیاری)
 چون گیست عمومی است، خطر MITM/جایگزینی لیست با سرورهای مخرب وجود دارد. راه‌حل: کلید خصوصی روی سرور امضا می‌کند، اپ موبایل کلید عمومی را embedded دارد و امضا را verify می‌کند.

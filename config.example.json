@@ -21,6 +21,11 @@
 
   "interval_minutes": 10,
 
+  "_dashboard_comment": "Local web console (logs, server table, delete, update). install.sh fills in a random dashboard_token. Open http://SERVER_IP:8787/?token=THE_TOKEN. Empty token = no auth (only behind a firewall/SSH tunnel).",
+  "dashboard_host": "0.0.0.0",
+  "dashboard_port": 8787,
+  "dashboard_token": "",
+
   "xray_path": "auto",
   "geoip_db": "GeoLite2-Country.mmdb",
 

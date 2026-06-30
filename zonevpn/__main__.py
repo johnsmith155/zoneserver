@@ -13,16 +13,31 @@ import logging
 import signal
 import sys
 import time
+from logging.handlers import RotatingFileHandler
 
 from . import config as cfgmod
+from . import state
 from .geo import GeoResolver
 from .runner import run_cycle
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+_fmt = logging.Formatter(
+    "%(asctime)s %(levelname)s %(name)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+                    datefmt="%Y-%m-%d %H:%M:%S")
+
+# Also write to a rotating file so the dashboard can show "live logs" without
+# needing journald permissions.
+try:
+    state.ensure_dir()
+    _fh = RotatingFileHandler(state.LOG_FILE, maxBytes=1_000_000, backupCount=2,
+                              encoding="utf-8")
+    _fh.setFormatter(_fmt)
+    logging.getLogger().addHandler(_fh)
+except Exception:  # pragma: no cover - never let logging setup kill the app
+    pass
+
 log = logging.getLogger("zonevpn")
 
 _stop = asyncio.Event()
