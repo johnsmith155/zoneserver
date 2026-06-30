@@ -36,6 +36,16 @@ class Tester:
         self.base_port: int = int(cfg.get("base_port", 20000))
         self.max_ping: int = int(cfg.get("max_ping", 3000))
 
+        # Learn each config's REAL exit by asking Cloudflare's trace endpoint
+        # *through the tunnel*. Many free configs are CDN-fronted (Cloudflare,
+        # etc.) or chained, so the share-link address is NOT where traffic
+        # actually egresses — geolocating that address gives the wrong flag
+        # (a server can look like it's in Iran when it isn't). The trace returns
+        # `ip=` (the true egress IP) and `loc=` (its country), which is correct.
+        self.geo_via_tunnel: bool = bool(cfg.get("geo_via_tunnel", True))
+        self.trace_url: str = cfg.get(
+            "trace_url", "https://www.cloudflare.com/cdn-cgi/trace")
+
         # ACCURACY-CRITICAL: how many delay measurements may run *at the same
         # instant* across ALL batches. The batches spin up thousands of proxies
         # cheaply, but if we fire all of their HTTP probes at once the CPU/NIC
@@ -290,9 +300,12 @@ class Tester:
                         ping = int((time.monotonic() - start) * 1000)
                         if best is None or ping < best:
                             best = ping
-                if ok and best is not None and 0 < best <= self.max_ping:
-                    cfg.ping = best
-                    result = cfg
+                    if ok and best is not None and 0 < best <= self.max_ping:
+                        cfg.ping = best
+                        # Reuse the same tunnel to learn the real exit IP/country.
+                        if self.geo_via_tunnel:
+                            await self._annotate_exit(session, cfg)
+                        result = cfg
             except Exception:
                 result = None
             finally:
@@ -300,3 +313,23 @@ class Tester:
                     await connector.close()
                 self._record(result)
             return result
+
+    async def _annotate_exit(self, session, cfg: ParsedConfig) -> None:
+        """Best-effort: read the true egress IP + country through the tunnel."""
+        try:
+            async with session.get(self.trace_url, allow_redirects=False) as resp:
+                if resp.status != 200:
+                    return
+                text = await resp.text()
+        except Exception:
+            return
+        ip = loc = ""
+        for line in text.splitlines():
+            if line.startswith("ip="):
+                ip = line[3:].strip()
+            elif line.startswith("loc="):
+                loc = line[4:].strip()
+        if ip:
+            cfg.exit_ip = ip
+        if len(loc) == 2 and loc.isalpha():
+            cfg.country = loc.upper()  # overrides the misleading address-based geo

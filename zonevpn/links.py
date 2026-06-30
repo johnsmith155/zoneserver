@@ -35,6 +35,7 @@ class ParsedConfig:
     # filled in later by the pipeline:
     ping: int = 0
     country: str = ""        # ISO-3166 alpha-2, e.g. "DE"
+    exit_ip: str = ""        # the REAL egress IP seen through the tunnel
     extra: dict = field(default_factory=dict)
 
 

@@ -52,6 +52,10 @@
     "measure_concurrency": 32,
     "ping_samples": 2,
 
+    "_geo_comment": "geo_via_tunnel asks Cloudflare's trace endpoint THROUGH each tunnel to learn the real exit IP + country, so CDN-fronted/chained configs get the correct flag (not the misleading address-based country). Turn off only if it slows the cycle too much.",
+    "geo_via_tunnel": true,
+    "trace_url": "https://www.cloudflare.com/cdn-cgi/trace",
+
     "max_configs_to_test": 0,
     "max_output": 300,
     "min_per_country": 0

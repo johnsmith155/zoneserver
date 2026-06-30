@@ -135,10 +135,15 @@ async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
             _progress("idle", active=False)
             return False
 
-    # 5. geo annotate (only the survivors -> cheap)
-    cc_map = await geo.annotate([c.address for c in alive])
-    for c in alive:
-        c.country = cc_map.get(c.address, "")
+    # 5. geo annotate. Prefer the REAL exit country learned through the tunnel
+    # (tester._annotate_exit); only fall back to address-based geo for the few
+    # configs we couldn't trace, since a CDN-fronted address geolocates wrong.
+    need_geo = [c.address for c in alive if not c.country]
+    if need_geo:
+        cc_map = await geo.annotate(need_geo)
+        for c in alive:
+            if not c.country:
+                c.country = cc_map.get(c.address, "")
 
     # 6. trim
     max_out = int(test_cfg.get("max_output", 0) or 0)
@@ -179,6 +184,8 @@ def _write_state(final: List[ParsedConfig], payload: dict, ok: bool,
         servers = []
         for parsed, item in zip(final, payload.get("configs", [])):
             servers.append({**item,
+                            "exit_ip": parsed.exit_ip,
+                            "front": f"{parsed.address}:{parsed.port}",
                             "block_key": state.block_key(parsed.address, parsed.port)})
         state.write_servers(servers)
         state.write_status({

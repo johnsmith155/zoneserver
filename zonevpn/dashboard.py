@@ -72,7 +72,9 @@ def _republish_without(deleted_key: str) -> tuple[bool, str]:
 
     servers = [s for s in state.read_servers()
                if s.get("block_key") != deleted_key]
-    configs = [{k: v for k, v in s.items() if k != "block_key"} for s in servers]
+    # Strip dashboard-only fields so the public gist keeps its clean shape.
+    _internal = {"block_key", "exit_ip", "front"}
+    configs = [{k: v for k, v in s.items() if k not in _internal} for s in servers]
     payload = {
         "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "count": len(configs),
@@ -345,8 +347,8 @@ _HTML = r"""<!doctype html>
       </div>
       <div class="tablewrap">
         <table>
-          <thead><tr><th>#</th><th>Server</th><th>Host : Port</th><th>Country</th><th>Ping</th><th>Proto</th><th></th></tr></thead>
-          <tbody id="rows"><tr><td colspan="7" class="muted">loading…</td></tr></tbody>
+          <thead><tr><th>#</th><th>Server</th><th>Front (host:port)</th><th>Exit IP</th><th>Country</th><th>Ping</th><th>Proto</th><th></th></tr></thead>
+          <tbody id="rows"><tr><td colspan="8" class="muted">loading…</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -391,13 +393,14 @@ async function refresh(){
       return `<tr>
         <td class=muted>${i+1}</td>
         <td>${s.name||''}</td>
-        <td class=mono>${s.block_key||''}</td>
+        <td class=mono>${s.front||s.block_key||''}</td>
+        <td class=mono>${s.exit_ip||'—'}</td>
         <td>${s.flag||''} ${s.country||'??'}</td>
         <td class="ping ${pc}">${s.ping<0?'—':s.ping+' ms'}</td>
         <td class=muted>${s.protocol||''}</td>
         <td><button class="btn danger" onclick="del('${s.block_key}')">Delete</button></td>
       </tr>`;}).join('');
-    $('rows').innerHTML = rows || '<tr><td colspan=7 class=muted>No servers yet — wait for the next cycle.</td></tr>';
+    $('rows').innerHTML = rows || '<tr><td colspan=8 class=muted>No servers yet — wait for the next cycle.</td></tr>';
     $('sCount').textContent = (d.servers?d.servers.length:0)+' published'
       + (d.manual&&d.manual.length?(' · '+d.manual.length+' manual'):'')
       + (d.blocklist&&d.blocklist.length?(' · '+d.blocklist.length+' blocked'):'');
