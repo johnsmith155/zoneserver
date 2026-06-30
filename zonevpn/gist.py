@@ -52,11 +52,22 @@ def raw_url(gist_id: str, filename: str) -> str:
 
 
 def publish(token: str, gist_id: str, filename: str, payload: dict,
-            base64_encode: bool = False) -> bool:
-    """Publish the payload. When base64_encode is set, the gist stores a single
-    base64 string of the (compact) JSON instead of readable JSON, so the content
-    is not obvious at a glance. The mobile app must base64-decode -> utf-8 -> JSON."""
-    if base64_encode:
+            base64_encode: bool = False,
+            sign_key_b64: Optional[str] = None) -> bool:
+    """Publish the payload.
+
+    - When [sign_key_b64] is provided, the gist stores a *signed envelope*
+      (base64) the app can cryptographically verify (Ed25519). This is the
+      strongest anti-spoofing option and takes priority over base64_encode.
+    - Else when [base64_encode] is set, the gist stores a single base64 string
+      of the (compact) JSON so the content isn't obvious at a glance. The mobile
+      app must base64-decode -> utf-8 -> JSON.
+    - Else the gist stores readable, indented JSON.
+    """
+    if sign_key_b64:
+        from . import sign as _sign
+        content = _sign.build_signed_content(payload, sign_key_b64)
+    elif base64_encode:
         raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         content = base64.b64encode(raw).decode("ascii")
     else:

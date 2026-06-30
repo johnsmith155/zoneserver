@@ -13,6 +13,10 @@
   "gist_filename": "zone-vpn.json",
   "gist_base64": true,
 
+  "_signing_comment": "Optional anti-spoofing. Run `python generate_keys.py`, put the PRIVATE key here and the PUBLIC key in the app. Leave empty to publish unsigned (current behaviour).",
+  "ed25519_private_key": "",
+  "ed25519_private_key_file": "",
+
   "name_prefix": "zone-vpn",
 
   "interval_minutes": 10,

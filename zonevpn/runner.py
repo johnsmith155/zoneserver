@@ -7,7 +7,7 @@ import time
 from typing import List
 
 from . import config as cfgmod
-from . import gist, links, sources
+from . import gist, links, sign, sources
 from .geo import GeoResolver
 from .links import ParsedConfig
 from .rename import build_output
@@ -70,10 +70,14 @@ async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
 
     # 6. build payload + publish
     payload = build_output(alive, cfg.get("name_prefix", "zone-vpn"))
+    sign_key = sign.load_private_key(cfg)  # None unless configured -> opt-in
     ok = gist.publish(
         cfg["github_token"], cfg["gist_id"], cfg["gist_filename"], payload,
         base64_encode=bool(cfg.get("gist_base64", True)),
+        sign_key_b64=sign_key,
     )
+    if sign_key:
+        log.info("payload signed (Ed25519) before publish")
     if ok:
         log.info("published %d configs to gist %s (%.1fs total)",
                  payload["count"], cfg["gist_id"], time.monotonic() - t0)
