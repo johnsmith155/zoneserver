@@ -31,25 +31,48 @@ def _progress(phase: str, active: bool = True, **extra) -> None:
 
 
 def _merge_manual(configs: List[ParsedConfig]) -> List[ParsedConfig]:
-    """Append operator-added servers (from the dashboard) and de-dup."""
+    """Append operator-added servers (from the dashboard) and flag them so the
+    rest of the pipeline never drops them, even if they're slow/fail testing."""
     manual = state.read_manual()
     if not manual:
         return configs
-    seen = {links.dedup_key(c) for c in configs}
-    added = 0
+    manual_keys = set()
+    parsed_manual: List[ParsedConfig] = []
     for raw in manual:
         parsed = links.parse_link(raw)
         if parsed is None:
             continue
-        key = links.dedup_key(parsed)
-        if key in seen:
+        parsed.manual = True
+        parsed_manual.append(parsed)
+        manual_keys.add(links.dedup_key(parsed))
+
+    # Flag any already-collected config that the operator also pinned.
+    for c in configs:
+        if links.dedup_key(c) in manual_keys:
+            c.manual = True
+
+    seen = {links.dedup_key(c) for c in configs}
+    added = 0
+    for parsed in parsed_manual:
+        if links.dedup_key(parsed) in seen:
             continue
-        seen.add(key)
+        seen.add(links.dedup_key(parsed))
         configs.append(parsed)
         added += 1
     if added:
         log.info("manual servers: added %d from the dashboard", added)
     return configs
+
+
+def _ensure_manual(alive: List[ParsedConfig],
+                   manual_by_key: dict) -> List[ParsedConfig]:
+    """Make sure every operator-pinned server is in the output, even if it
+    didn't pass testing (it'll show with an unknown ping until it works)."""
+    present = {links.dedup_key(c) for c in alive}
+    for key, mc in manual_by_key.items():
+        if key not in present:
+            alive.append(mc)
+    return alive
 
 
 async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
@@ -75,6 +98,7 @@ async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
         _progress("idle", active=False)
         return False
     collected = len(configs)
+    manual_by_key = {links.dedup_key(c): c for c in configs if c.manual}
 
     # 1b. drop anything the operator deleted from the dashboard (by address:port)
     blocked = set(state.load_blocklist())
@@ -117,6 +141,8 @@ async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
     _progress("testing", threads=threads, collected=collected,
               reachable=reachable, tested=0, total=reachable, alive=0, recent=[])
     alive = await tester.run(configs, progress_cb=_on_test_progress)
+    # Operator-pinned servers are always kept, even if they failed the test.
+    alive = _ensure_manual(alive, manual_by_key)
     log.info("alive after testing: %d / %d (%.1fs)",
              len(alive), reachable, time.monotonic() - t0)
     if not alive:
@@ -124,11 +150,13 @@ async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
         _progress("idle", active=False)
         return False
 
-    # 4. publish only genuinely fast servers (real delay under the threshold).
+    # 4. publish only genuinely fast servers (real delay under the threshold) —
+    # but never drop a manually-added server.
     publish_max_ping = int(test_cfg.get("publish_max_ping", 800) or 0)
     if publish_max_ping > 0:
         before = len(alive)
-        alive = [c for c in alive if 0 < c.ping <= publish_max_ping]
+        alive = [c for c in alive
+                 if c.manual or 0 < c.ping <= publish_max_ping]
         log.info("fast filter (<=%dms): %d -> %d", publish_max_ping, before, len(alive))
         if not alive:
             log.warning("no server under %dms; not publishing", publish_max_ping)
@@ -145,10 +173,18 @@ async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
             if not c.country:
                 c.country = cc_map.get(c.address, "")
 
-    # 6. trim
+    # 6. trim (manual servers are exempt — they always stay)
     max_out = int(test_cfg.get("max_output", 0) or 0)
     if max_out and len(alive) > max_out:
-        alive = _trim(alive, max_out, int(test_cfg.get("min_per_country", 0) or 0))
+        manual_part = [c for c in alive if c.manual]
+        others = [c for c in alive if not c.manual]
+        keep = max(0, max_out - len(manual_part))
+        others = _trim(others, keep, int(test_cfg.get("min_per_country", 0) or 0))
+        alive = manual_part + others
+
+    # Final order: by real delay ascending; untested/unknown (ping<=0, e.g. a
+    # manual server that didn't pass) sink to the bottom.
+    alive.sort(key=lambda c: c.ping if c.ping and c.ping > 0 else 10 ** 9)
 
     # 7. build payload + publish
     _progress("publishing", threads=threads, collected=collected,

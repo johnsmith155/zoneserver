@@ -296,6 +296,9 @@ _HTML = r"""<!doctype html>
   .addrow{display:flex;gap:10px;padding:12px 16px;border-top:1px solid var(--stroke)}
   .addrow input{flex:1;background:var(--panel2);border:1px solid var(--stroke);color:var(--txt);
     padding:9px 12px;border-radius:10px;font-size:13px;font-family:ui-monospace,monospace}
+  .manhdr{padding:6px 16px 2px;color:var(--txt3);font-size:12px}
+  .manrow{display:flex;gap:10px;align-items:center;padding:6px 16px;border-top:1px solid var(--panel2)}
+  .manrow span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
   #feed{margin:0;padding:12px 16px;max-height:170px;overflow:auto;white-space:pre-wrap;
     font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:#bcd0ea;background:var(--panel2)}
   .toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);background:#121a2c;
@@ -345,6 +348,7 @@ _HTML = r"""<!doctype html>
         <input id="addLink" placeholder="Paste vmess:// vless:// trojan:// ss:// link to add a server"/>
         <button class="btn primary" onclick="addServer()">+ Add</button>
       </div>
+      <div id="manualList"></div>
       <div class="tablewrap">
         <table>
           <thead><tr><th>#</th><th>Server</th><th>Front (host:port)</th><th>Exit IP</th><th>Country</th><th>Ping</th><th>Proto</th><th></th></tr></thead>
@@ -366,6 +370,8 @@ _HTML = r"""<!doctype html>
 const TOKEN = new URLSearchParams(location.search).get('token') || '';
 const H = TOKEN ? {'X-Dashboard-Token': TOKEN} : {};
 const $ = id => document.getElementById(id);
+let MANUAL = [];
+function esc(s){return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 
 function toast(m){const t=$('toast');t.textContent=m;t.classList.add('show');
   setTimeout(()=>t.classList.remove('show'),2600);}
@@ -405,6 +411,14 @@ async function refresh(){
       + (d.manual&&d.manual.length?(' · '+d.manual.length+' manual'):'')
       + (d.blocklist&&d.blocklist.length?(' · '+d.blocklist.length+' blocked'):'');
 
+    // manual servers list (operator-added; always kept and tested each cycle)
+    MANUAL = d.manual || [];
+    $('manualList').innerHTML = MANUAL.length
+      ? '<div class=manhdr>Manual servers (added by you — kept every cycle):</div>'
+        + MANUAL.map((m,i)=>`<div class=manrow><span class=mono title="${esc(m)}">${esc(m)}</span>`
+          + `<button class="btn danger" onclick="delManual(${i})">remove</button></div>`).join('')
+      : '';
+
     // config error banner
     const ce=$('cfgErr');
     if(d.config_error){ce.style.display='block';
@@ -439,6 +453,14 @@ async function addServer(){
     toast(d.ok?('Added · '+d.message):('Add failed · '+(d.message||d.error)));
     if(d.ok){el.value='';refresh();}}
   catch(e){toast('add failed');}
+}
+
+async function delManual(i){
+  const link=MANUAL[i]; if(!link) return;
+  try{const r=await fetch('/api/remove_manual',{method:'POST',
+      headers:{'Content-Type':'application/json',...H},body:JSON.stringify({link})});
+    await r.json(); toast('Removed manual server'); refresh();}
+  catch(e){toast('remove failed');}
 }
 
 async function loadLog(){

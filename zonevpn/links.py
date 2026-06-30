@@ -36,6 +36,7 @@ class ParsedConfig:
     ping: int = 0
     country: str = ""        # ISO-3166 alpha-2, e.g. "DE"
     exit_ip: str = ""        # the REAL egress IP seen through the tunnel
+    manual: bool = False     # operator-added (dashboard) -> always kept
     extra: dict = field(default_factory=dict)
 
 
