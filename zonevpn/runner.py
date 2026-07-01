@@ -221,6 +221,7 @@ def _write_state(final: List[ParsedConfig], payload: dict, ok: bool,
         for parsed, item in zip(final, payload.get("configs", [])):
             servers.append({**item,
                             "exit_ip": parsed.exit_ip,
+                            "tcp_ping": parsed.tcp_ping,
                             "front": f"{parsed.address}:{parsed.port}",
                             "block_key": state.block_key(parsed.address, parsed.port)})
         state.write_servers(servers)

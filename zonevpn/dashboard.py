@@ -351,8 +351,8 @@ _HTML = r"""<!doctype html>
       <div id="manualList"></div>
       <div class="tablewrap">
         <table>
-          <thead><tr><th>#</th><th>Server</th><th>Front (host:port)</th><th>Exit IP</th><th>Country</th><th>Ping</th><th>Proto</th><th></th></tr></thead>
-          <tbody id="rows"><tr><td colspan="8" class="muted">loading…</td></tr></tbody>
+          <thead><tr><th>#</th><th>Server</th><th>Front (host:port)</th><th>Exit IP</th><th>Country</th><th>Ping</th><th>TCP</th><th>Proto</th><th></th></tr></thead>
+          <tbody id="rows"><tr><td colspan="9" class="muted">loading…</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -403,10 +403,11 @@ async function refresh(){
         <td class=mono>${s.exit_ip||'—'}</td>
         <td>${s.flag||''} ${s.country||'??'}</td>
         <td class="ping ${pc}">${s.ping<0?'—':s.ping+' ms'}</td>
+        <td class=muted>${s.tcp_ping==null||s.tcp_ping<0?'—':s.tcp_ping+' ms'}</td>
         <td class=muted>${s.protocol||''}</td>
         <td><button class="btn danger" onclick="del('${s.block_key}')">Delete</button></td>
       </tr>`;}).join('');
-    $('rows').innerHTML = rows || '<tr><td colspan=8 class=muted>No servers yet — wait for the next cycle.</td></tr>';
+    $('rows').innerHTML = rows || '<tr><td colspan=9 class=muted>No servers yet — wait for the next cycle.</td></tr>';
     $('sCount').textContent = (d.servers?d.servers.length:0)+' published'
       + (d.manual&&d.manual.length?(' · '+d.manual.length+' manual'):'')
       + (d.blocklist&&d.blocklist.length?(' · '+d.blocklist.length+' blocked'):'');

@@ -37,7 +37,7 @@
     "tcp_timeout": 3,
     "tcp_concurrency": 256,
 
-    "test_url": "http://cp.cloudflare.com/generate_204",
+    "test_url": "https://www.google.com/generate_204",
     "expected_status": [204, 200],
     "timeout": 5,
     "batch_size": 100,

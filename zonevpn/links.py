@@ -33,7 +33,8 @@ class ParsedConfig:
     raw: str                 # original share link
     name: str = ""           # original remark
     # filled in later by the pipeline:
-    ping: int = 0
+    ping: int = 0            # real delay through the tunnel (ms)
+    tcp_ping: int = -1       # raw TCP connect time to address:port (ms)
     country: str = ""        # ISO-3166 alpha-2, e.g. "DE"
     exit_ip: str = ""        # the REAL egress IP seen through the tunnel
     manual: bool = False     # operator-added (dashboard) -> always kept

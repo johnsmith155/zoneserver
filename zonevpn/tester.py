@@ -28,7 +28,7 @@ log = logging.getLogger("zonevpn.tester")
 class Tester:
     def __init__(self, xray_path: str, cfg: dict):
         self.xray_path = xray_path
-        self.test_url: str = cfg.get("test_url", "http://cp.cloudflare.com/generate_204")
+        self.test_url: str = cfg.get("test_url", "https://www.google.com/generate_204")
         self.expected = set(cfg.get("expected_status", [204, 200]))
         self.timeout: float = float(cfg.get("timeout", 6))
         self.batch_size: int = int(cfg.get("batch_size", 100))
@@ -89,9 +89,12 @@ class Tester:
         async def check(cfg: ParsedConfig):
             async with sem:
                 writer = None
+                start = time.monotonic()
                 try:
                     fut = asyncio.open_connection(cfg.address, cfg.port)
                     _, writer = await asyncio.wait_for(fut, timeout=timeout)
+                    # Record the raw TCP handshake time (tcping) for every config.
+                    cfg.tcp_ping = int((time.monotonic() - start) * 1000)
                     return cfg
                 except Exception:
                     return None
