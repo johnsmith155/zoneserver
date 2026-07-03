@@ -116,8 +116,9 @@ async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
 
     tester = Tester(xray_path, test_cfg)
 
-    # 2. cheap TCP pre-filter (huge win at this scale, especially from Iran)
-    if test_cfg.get("tcp_prefilter", True):
+    # 2. optional TCP pre-filter (OFF by default now — it falsely drops working
+    # CDN/domain-fronted configs; testing everything via xray yields more).
+    if test_cfg.get("tcp_prefilter", False):
         _progress("prefilter", threads=threads, collected=collected)
         before = len(configs)
         configs = await tester.tcp_prefilter(
@@ -164,14 +165,25 @@ async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
             return False
 
     # 5. geo annotate. Prefer the REAL exit country learned through the tunnel
-    # (tester._annotate_exit); only fall back to address-based geo for the few
-    # configs we couldn't trace, since a CDN-fronted address geolocates wrong.
-    need_geo = [c.address for c in alive if not c.country]
+    # (tester._annotate_exit). For the rest, geolocate the measured exit IP when
+    # we have one (accurate), else the front address (a CDN address geos wrong).
+    need_geo = [c for c in alive if not c.country]
     if need_geo:
-        cc_map = await geo.annotate(need_geo)
-        for c in alive:
-            if not c.country:
-                c.country = cc_map.get(c.address, "")
+        cc_map = await geo.annotate([(c.exit_ip or c.address) for c in need_geo])
+        for c in need_geo:
+            c.country = cc_map.get(c.exit_ip or c.address, "")
+
+    # 5b. Drop servers whose REAL exit is Iran — a tunnel that exits inside the
+    # user's own (restricted) country is useless and misleading, so it never
+    # makes the list.
+    before = len(alive)
+    alive = [c for c in alive if (c.country or "").upper() != "IR"]
+    if before != len(alive):
+        log.info("dropped %d server(s) with an Iran exit", before - len(alive))
+    if not alive:
+        log.warning("everything exited via Iran; not publishing")
+        _progress("idle", active=False)
+        return False
 
     # 6. trim (manual servers are exempt — they always stay)
     max_out = int(test_cfg.get("max_output", 0) or 0)

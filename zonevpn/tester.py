@@ -45,6 +45,9 @@ class Tester:
         self.geo_via_tunnel: bool = bool(cfg.get("geo_via_tunnel", True))
         self.trace_url: str = cfg.get(
             "trace_url", "https://www.cloudflare.com/cdn-cgi/trace")
+        # Fallback egress-IP echo used when the trace is unreachable, so a
+        # config's country can still be resolved (the runner geolocates the IP).
+        self.ip_echo_url: str = cfg.get("ip_echo_url", "https://api.ipify.org")
 
         # ACCURACY-CRITICAL: how many delay measurements may run *at the same
         # instant* across ALL batches. The batches spin up thousands of proxies
@@ -318,21 +321,32 @@ class Tester:
             return result
 
     async def _annotate_exit(self, session, cfg: ParsedConfig) -> None:
-        """Best-effort: read the true egress IP + country through the tunnel."""
+        """Best-effort: read the true egress IP + country through the tunnel.
+
+        Cloudflare's trace gives both IP and country directly. If it's
+        unreachable from this exit, fall back to a plain IP echo so the runner
+        can still geolocate the country (better than an unknown flag).
+        """
+        ip = loc = ""
         try:
             async with session.get(self.trace_url, allow_redirects=False) as resp:
-                if resp.status != 200:
-                    return
-                text = await resp.text()
+                if resp.status == 200:
+                    text = await resp.text()
+                    for line in text.splitlines():
+                        if line.startswith("ip="):
+                            ip = line[3:].strip()
+                        elif line.startswith("loc="):
+                            loc = line[4:].strip()
         except Exception:
-            return
-        ip = loc = ""
-        for line in text.splitlines():
-            if line.startswith("ip="):
-                ip = line[3:].strip()
-            elif line.startswith("loc="):
-                loc = line[4:].strip()
-        if ip:
+            pass
+        if not ip:
+            try:
+                async with session.get(self.ip_echo_url, allow_redirects=False) as resp:
+                    if resp.status == 200:
+                        ip = (await resp.text()).strip()
+            except Exception:
+                pass
+        if ip and ("." in ip or ":" in ip) and len(ip) <= 45:
             cfg.exit_ip = ip
         if len(loc) == 2 and loc.isalpha():
             cfg.country = loc.upper()  # overrides the misleading address-based geo

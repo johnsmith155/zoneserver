@@ -33,7 +33,8 @@
   "test": {
     "tls_allow_insecure": true,
 
-    "tcp_prefilter": true,
+    "_tcp_prefilter_comment": "OFF: a raw TCP connect from Iran falsely drops many working CDN/domain-fronted configs (they only work through xray with proper SNI/routing). Skipping it tests everything via xray -> more real servers, at the cost of a slower cycle.",
+    "tcp_prefilter": false,
     "tcp_timeout": 3,
     "tcp_concurrency": 256,
 
