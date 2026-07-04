@@ -19,8 +19,8 @@
 
   "name_prefix": "zone-vpn",
 
-  "_interval_comment": "How often a full collect/test/publish cycle starts. 60 = once an hour, as designed. Cycles never overlap: if one runs long, the next starts right after it finishes.",
-  "interval_minutes": 60,
+  "_interval_comment": "How often a full collect/test/publish cycle starts, so dead servers drop and new ones appear. 5 = every 5 min. Cycles never overlap: if one runs longer than this (likely at 10k configs with tcp_prefilter off), the next just starts right after it finishes.",
+  "interval_minutes": 5,
 
   "_dashboard_comment": "Local web console (logs, server table, delete, update). install.sh fills in a random dashboard_token. Open http://SERVER_IP:8787/?token=THE_TOKEN. Empty token = no auth (only behind a firewall/SSH tunnel).",
   "dashboard_host": "0.0.0.0",
