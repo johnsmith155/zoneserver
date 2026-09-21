@@ -1,26 +1,20 @@
 {
   "_comment": "Copy this file to config.json (the setup wizard does it for you). DO NOT commit config.json - it contains your GitHub token.",
   "sources": [
-    "https://raw.githubusercontent.com/barry-far/V2ray-config/main/All_Configs_Sub.txt",
-    "https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/All_Configs_base64_Sub.txt",
-    "https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/sub_merge.txt",
-    "https://raw.githubusercontent.com/MatinGhanbari/v2ray-configs/main/subscriptions/v2ray/all_sub.txt",
-    "https://raw.githubusercontent.com/LalatinaHub/Mineral/master/result/nodes",
-    "https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/main/V2Ray-Config-By-EbraSha.txt",
-    "https://raw.githubusercontent.com/ALIILAPRO/v2rayNG-Config/main/sub.txt",
-    "https://raw.githubusercontent.com/MahanKenway/Freedom-V2Ray/main/configs/mix.txt",
-    "https://raw.githubusercontent.com/w1770946466/Auto_proxy/main/Long_term_subscription_num",
-    "https://raw.githubusercontent.com/sun9426/sun9426.github.io/main/subscribe/v2ray.txt",
-    "https://raw.githubusercontent.com/miladtahanian/Config-Collector/main/mixed_iran.txt",
-    "https://raw.githubusercontent.com/MohammadBahemmat/V2ray-Collector/main/all_servers.txt",
-    "https://raw.githubusercontent.com/Leon406/SubCrawler/main/sub/share/ss",
-    "https://raw.githubusercontent.com/V2RayRoot/V2RayConfig/main/Config/vless.txt",
-    "https://raw.githubusercontent.com/V2RayRoot/V2RayConfig/main/Config/shadowsocks.txt",
     "https://raw.githubusercontent.com/Mahdi0024/ProxyCollector/master/sub/proxies.txt",
     "https://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/v2ray.txt",
-    "https://raw.githubusercontent.com/Kwinshadow/TelegramV2rayCollector/main/sublinks/mix.txt",
-    "https://raw.githubusercontent.com/Roosterkid/openproxylist/main/V2RAY_RAW.txt",
-    "https://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub"
+    "https://raw.githubusercontent.com/MohammadBahemmat/V2ray-Collector/main/all_servers.txt",
+    "https://raw.githubusercontent.com/miladtahanian/Config-Collector/main/mixed_iran.txt",
+    "https://raw.githubusercontent.com/iboxz/free-v2ray-collector/main/main/mix.txt",
+    "https://raw.githubusercontent.com/MhdiTaheri/V2rayCollector_Py/main/sub/Mix/mix.txt",
+    "https://raw.githubusercontent.com/ProblemTheCode/SylphNet-public/main/sub/sub.txt",
+    "https://raw.githubusercontent.com/Mokafela/Config-Finder/master/split/sub-ALL.txt",
+    "https://raw.githubusercontent.com/kasesm/Free-Config/main/all_raw.txt",
+    "https://raw.githubusercontent.com/MhdiTaheri/V2rayCollector/main/sub/mix",
+    "https://raw.githubusercontent.com/MatinGhanbari/v2ray-configs/main/subscriptions/v2ray/all_sub.txt",
+    "https://raw.githubusercontent.com/barry-far/V2ray-config/main/All_Configs_Sub.txt",
+    "https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/main/V2Ray-Config-By-EbraSha.txt",
+    "https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/All_Configs_base64_Sub.txt"
   ],
   "github_token": "",
   "gist_id": "",
@@ -88,5 +82,5 @@
     "max_output": 300,
     "min_per_country": 0
   },
-  "_sources_comment": "Chosen on measured contribution, not on how many links a file advertises: these repos copy from each other, so several of the biggest add nothing the pool already has. Audited from the server (12133 unique endpoints across this list); anything whose every endpoint was already covered by another source was dropped. Every cycle logs `source yield: N alive / M tested` per source, which is the number to add or drop one on. Unchanged files cost nothing to re-check - the fetcher is conditional (ETag/304)."
+  "_sources_comment": "Chosen on MEASURED yield, not on how many links a file advertises. Six cycles of `source yield: N alive / M tested` said the same thing twice over: small repos that are rebuilt hourly and test before publishing beat multi-thousand-entry warehouses by two orders of magnitude - Mahdi0024 ran at 20%, ermaozi and MohammadBahemmat at ~9%, while mahdibland returned 0 from 12989 tested endpoints and LalatinaHub/Mineral 0 from 4142, despite Mineral having contributed the most endpoints no other source had. Twelve sources that produced nothing at all were dropped. Keep reading that log before adding or removing anything here; an unchanged source costs a 304, so the cheap part is fetching, not testing."
 }
