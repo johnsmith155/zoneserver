@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from typing import List
@@ -110,6 +111,18 @@ async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
         if before != len(configs):
             log.info("blocklist: dropped %d server(s)", before - len(configs))
 
+    # 1c. Skip what this xray build is already known to refuse. Cheap: no
+    # process, just a set lookup, and it keeps the sift below down to whatever
+    # is genuinely new since the last cycle.
+    build = _xray_build(xray_path)
+    rejects = state.read_rejects(build)
+    if rejects:
+        before = len(configs)
+        configs = [c for c in configs if links.fingerprint(c) not in rejects]
+        if before != len(configs):
+            log.info("skipping %d config(s) this xray build cannot load",
+                     before - len(configs))
+
     pool = configs
     configs = _select_for_testing(test_cfg, configs)
 
@@ -137,6 +150,29 @@ async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
     def _on_test_progress(snap: dict) -> None:
         _progress("testing", threads=threads, collected=collected,
                   reachable=reachable, **snap)
+
+    # 2b. One bad config poisons a whole batch of 64, so find them with xray's
+    # own validator before any of them cost a process start. See [Tester.sift].
+    _progress("sifting", threads=threads, collected=collected,
+              reachable=reachable)
+    configs, unparseable = await tester.sift(configs)
+    if unparseable:
+        log.info("xray rejects %d of the selected config(s); remembering them",
+                 len(unparseable))
+        rejects |= {links.fingerprint(c) for c in unparseable}
+    if rejects:
+        # Forget fingerprints the sources no longer carry, so the file cannot
+        # grow without bound.
+        live = {links.fingerprint(c) for c in pool}
+        try:
+            state.write_rejects(build, rejects & live)
+        except Exception:
+            log.exception("failed to save the xray reject list (non-fatal)")
+    if not configs:
+        log.warning("nothing left to test after sifting; skipping cycle")
+        _progress("idle", active=False)
+        return False
+    reachable = len(configs)
 
     _progress("testing", threads=threads, collected=collected,
               reachable=reachable, tested=0, total=reachable, alive=0, recent=[])
@@ -261,6 +297,19 @@ async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
     _progress("idle", active=False, published=payload.get("count", len(alive)),
               duration_s=round(time.monotonic() - t0, 1))
     return ok
+
+
+def _xray_build(xray_path: str) -> str:
+    """An identity for the xray binary, without running it.
+
+    Size and mtime are enough to notice an upgrade, which is all this is for:
+    the reject list is only valid for the build that produced it.
+    """
+    try:
+        st = os.stat(xray_path)
+        return f"{st.st_size}:{int(st.st_mtime)}"
+    except OSError:
+        return "unknown"
 
 
 def _select_for_testing(test_cfg: dict,

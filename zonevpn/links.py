@@ -13,6 +13,7 @@ skipped so they never end up in the published list.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import urllib.parse
 from dataclasses import dataclass, field
@@ -329,3 +330,14 @@ def rebuild_link(link: str, new_name: str) -> str:
 def dedup_key(cfg: ParsedConfig) -> str:
     """Identity used to drop duplicate servers before testing."""
     return f"{cfg.protocol}|{cfg.address.lower()}|{cfg.port}"
+
+
+def fingerprint(cfg: ParsedConfig) -> str:
+    """Identity of the OUTBOUND, for remembering what xray refused to load.
+
+    Hashes the built outbound rather than the share link, because these lists
+    re-emit the same server with a new remark constantly - the link changes,
+    the thing xray rejects does not.
+    """
+    blob = json.dumps(cfg.outbound, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:16]

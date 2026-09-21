@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import tempfile
 import time
 from typing import Callable, List, Optional
@@ -23,6 +24,10 @@ from aiohttp_socks import ProxyConnector
 from .links import ParsedConfig
 
 log = logging.getLogger("zonevpn.tester")
+
+# xray names the outbound it could not build:
+#   "failed to build outbound config with tag out12 > ..."
+_BAD_TAG = re.compile(r"tag out(\d+)")
 
 
 class Tester:
@@ -75,6 +80,10 @@ class Tester:
         # measured at all. Defaults to `timeout`, the looser of the two.
         self.screen_timeout: float = float(
             cfg.get("screen_timeout", 0) or 0) or self.timeout
+
+        # How the unparseable configs are found. See [sift].
+        self.sift_chunk: int = int(cfg.get("sift_chunk", 200))
+        self.sift_concurrency: int = int(cfg.get("sift_concurrency", 4))
 
         # --- Does the tunnel actually get past the filter? ------------------
         #
@@ -276,6 +285,93 @@ class Tester:
             })
         except Exception:
             pass
+
+    # ------------------------------------------------------------------ #
+    async def sift(self, configs: List[ParsedConfig]
+                   ) -> "tuple[List[ParsedConfig], List[ParsedConfig]]":
+        """Split the pool into what this xray build will load, and what it won't.
+
+        ## Why this exists
+
+        Free lists carry configs this build cannot parse - a cipher it dropped,
+        a transport it renamed, a field that moved. They are a small minority,
+        about one in twenty, but they are poison in a batch: xray refuses the
+        whole file, so 63 good configs go down with one bad one and the batch
+        splits, and splits again, and each half pays a process start and a
+        readiness deadline before failing the same way.
+
+        Measured before this: 600 configs took 276 batch starts instead of 10,
+        and the screening pass averaged 34 probes in flight against a limit of
+        256 - almost all of the time was spent starting xray processes that were
+        never going to run, on a machine sitting at a quarter of one core.
+
+        The fix is that xray already knows, and says so. `run -test` validates a
+        config and exits without binding anything, and the error names the
+        outbound: `failed to build outbound config with tag out12`. So drop
+        number 12, ask again, and repeat - three or four cheap validations per
+        chunk instead of a tree of real process starts. Halving is kept only for
+        the case where the message does not name a tag.
+        """
+        if not configs:
+            return [], []
+        size = max(1, self.sift_chunk)
+        chunks = [configs[i:i + size] for i in range(0, len(configs), size)]
+        sem = asyncio.Semaphore(max(1, self.sift_concurrency))
+
+        async def one(chunk):
+            async with sem:
+                return await self._sift_chunk(list(chunk))
+
+        results = await asyncio.gather(*[one(c) for c in chunks])
+        good = [c for g, _ in results for c in g]
+        bad = [c for _, b in results for c in b]
+        return good, bad
+
+    async def _sift_chunk(self, chunk: List[ParsedConfig]
+                          ) -> "tuple[List[ParsedConfig], List[ParsedConfig]]":
+        bad: List[ParsedConfig] = []
+        while chunk:
+            path = self._write_batch_config(chunk, self.base_port)
+            try:
+                code, err = await self._xray_test(path)
+            finally:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+            if code == 0:
+                return chunk, bad
+            match = _BAD_TAG.search(err)
+            if match is None or int(match.group(1)) >= len(chunk):
+                # xray would not say which one. Fall back to halving, which is
+                # now confined to the handful of cases that need it.
+                if len(chunk) == 1:
+                    return [], bad + chunk
+                mid = len(chunk) // 2
+                left, right = await asyncio.gather(
+                    self._sift_chunk(chunk[:mid]),
+                    self._sift_chunk(chunk[mid:]))
+                return left[0] + right[0], bad + left[1] + right[1]
+            bad.append(chunk.pop(int(match.group(1))))
+        return chunk, bad
+
+    async def _xray_test(self, path: str) -> "tuple[int, str]":
+        """Validate a config file without starting anything. (code, output)"""
+        proc = await asyncio.create_subprocess_exec(
+            self.xray_path, "run", "-test", "-c", path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+                await proc.wait()
+            except ProcessLookupError:
+                pass
+            return 1, ""
+        return proc.returncode or 0, out.decode("utf-8", "replace")
 
     # ------------------------------------------------------------------ #
     async def _run_batch(self, batch: List[ParsedConfig]) -> List[ParsedConfig]:

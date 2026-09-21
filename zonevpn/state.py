@@ -34,6 +34,7 @@ SERVERS_FILE = STATE_DIR / "servers.json"
 BLOCKLIST_FILE = STATE_DIR / "blocklist.json"
 PROGRESS_FILE = STATE_DIR / "progress.json"
 CURSOR_FILE = STATE_DIR / "rotation.json"
+REJECTS_FILE = STATE_DIR / "xray_rejects.json"
 MANUAL_FILE = STATE_DIR / "manual.json"
 LOG_FILE = STATE_DIR / "zonevpn.log"
 
@@ -148,6 +149,28 @@ def read_cursor() -> int:
 
 def write_cursor(cursor: int) -> None:
     _atomic_write(CURSOR_FILE, json.dumps({"cursor": max(0, int(cursor))}))
+
+
+# --------------------------------------------------------------------------- #
+# configs this xray build refuses to load (see tester.sift)                    #
+# --------------------------------------------------------------------------- #
+def read_rejects(build: str) -> set:
+    """The fingerprints xray rejected, if they were learned on THIS build.
+
+    Tied to the binary: a different xray parses a different set, and carrying
+    the old list across an upgrade would permanently hide configs the new
+    build handles fine.
+    """
+    data = _read_json(REJECTS_FILE, {})
+    if not isinstance(data, dict) or data.get("build") != build:
+        return set()
+    keys = data.get("keys")
+    return set(keys) if isinstance(keys, list) else set()
+
+
+def write_rejects(build: str, keys) -> None:
+    _atomic_write(REJECTS_FILE, json.dumps(
+        {"build": build, "keys": sorted(keys)}, ensure_ascii=False))
 
 
 # --------------------------------------------------------------------------- #
