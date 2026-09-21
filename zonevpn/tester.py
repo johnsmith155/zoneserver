@@ -350,23 +350,30 @@ class Tester:
                         ping = int((time.monotonic() - start) * 1000)
                         if best is None or ping < best:
                             best = ping
-                    if ok and best is not None and 0 < best <= self.max_ping:
-                        # Fast *and* actually able to get past the filter. The
-                        # order matters: the cheap latency probe rules out most
-                        # configs, so only the survivors pay for this.
-                        if self.require_censored and not await self._passes_filter(session):
-                            ok = False
+                    usable = ok and best is not None and 0 < best <= self.max_ping
+
+                    # Order matters: the cheap latency probe has already ruled
+                    # out most configs, so only the survivors pay for the rest.
+                    if usable and self.require_censored:
+                        if not await self._passes_filter(session):
+                            # Healthy and quick, and unable to reach anything
+                            # this network blocks — so it is not a way out of
+                            # it. Set aside rather than discarded: if *every*
+                            # config lands here then the check itself is what
+                            # is broken, and the runner falls back to this list
+                            # instead of publishing nothing.
                             cfg.ping = best
                             self.filtered_out.append(cfg)
-                    if ok and best is not None and 0 < best <= self.max_ping:
-                        if self.min_kbps > 0:
-                            kbps = await self._measure_kbps(session)
-                            cfg.extra["kbps"] = int(kbps)
-                            if kbps < self.min_kbps:
-                                ok = False
-                    if ok and best is not None and 0 < best <= self.max_ping:
+                            usable = False
+
+                    if usable and self.min_kbps > 0:
+                        kbps = await self._measure_kbps(session)
+                        cfg.extra["kbps"] = int(kbps)
+                        usable = kbps >= self.min_kbps
+
+                    if usable:
                         cfg.ping = best
-                        # Reuse the same tunnel to learn the real exit IP/country.
+                        # Reuse the same tunnel for the real exit IP/country.
                         if self.geo_via_tunnel:
                             await self._annotate_exit(session, cfg)
                         result = cfg

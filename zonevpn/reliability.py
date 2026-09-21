@@ -18,15 +18,18 @@ every cycle already tests everything.
 ## What it does
 
 Each endpoint (`address:port`, stable across cycles even though every config is
-renamed and re-encoded every run) keeps the outcome of the last
-[window] cycles. From that:
-
-  * `score`  — the fraction that passed.
-  * `streak` — consecutive failures, which is what disqualifies a node outright.
+renamed and re-encoded every run) keeps the outcome of the last [window]
+cycles, and the fraction that passed is its `score`.
 
 A node with no history yet is never blocked: nothing new could ever be
-published if it were. It has to *earn* a bad reputation over
-`min_samples` cycles before the score is allowed to reject it.
+published if it were. It has to *earn* a bad reputation over `min_samples`
+cycles before the score is allowed to reject it.
+
+Note that the current cycle's own result is recorded *before* the score is
+read, so a node being judged always has its latest pass counted. That is
+deliberate — the most recent evidence is the most relevant — and it means the
+bar is genuinely "more than half of the recent cycles", not "was perfect until
+now".
 
 The file is a plain dict on disk, pruned to what the current sources still
 contain, so it cannot grow without bound.
@@ -105,15 +108,6 @@ class Reliability:
         if not hist:
             return 1.0
         return sum(hist) / len(hist)
-
-    def fail_streak(self, key: str) -> int:
-        hist = self._data.get(key, [])
-        streak = 0
-        for outcome in reversed(hist):
-            if outcome:
-                break
-            streak += 1
-        return streak
 
     def is_trusted(self, key: str, min_score: float,
                    min_samples: int = DEFAULT_MIN_SAMPLES) -> bool:
