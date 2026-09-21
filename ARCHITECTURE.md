@@ -15,8 +15,9 @@
 
 ```
 sources.collect()        # دانلود لینک‌ها از URLهای config، دیکد ساب‌های base64، parse + dedup
-  -> tester.tcp_prefilter()   # فیلتر ارزان TCP قبل از صرف منابع xray
-  -> tester.run()             # تست تأخیر واقعی از طریق پراسس(های) xray، ping-sorted alive list
+  -> tester.tcp_prefilter()   # (پیش‌فرض خاموش) فیلتر ارزان TCP قبل از صرف منابع xray
+  -> tester.run()             # دو پاس: غربالِ پهن (یک پروب، دور ریختنی) و بعد
+                              # اندازه‌گیریِ باریک روی جواب‌دهنده‌ها — ping-sorted
   -> geo.annotate()           # IP -> کد کشور (mmdb محلی یا ip-api.com fallback)
   -> runner._trim()           # نگه داشتن سریع‌ترین N، با حداقل سهم به‌ازای کشور (اختیاری)
   -> rename.build_output()    # نام‌گذاری zone-vpn-xxxxx + ساخت payload نهایی
@@ -32,7 +33,7 @@ sources.collect()        # دانلود لینک‌ها از URLهای config، 
 | `config.py` | خواندن `config.json`، پیدا کردن باینری xray، resolve مسیر GeoIP db. |
 | `sources.py` | دانلود متن از URLهای منبع (هندل ساب‌های base64-encoded)، parse و dedup لینک‌ها. |
 | `links.py` | تبدیل لینک‌های vmess/vless/trojan/ss به آبجکت outbound برای xray؛ `ParsedConfig` دیتاکلاس اصلی؛ rebuild لینک با نام جدید؛ `dedup_key`. |
-| `tester.py` | هستهٔ پرفورمنس: batch کردن کانفیگ‌ها در پراسس‌های مشترک xray (هر کانفیگ یک SOCKS inbound) برای تست تأخیر واقعی HTTP با کمترین overhead. شامل TCP pre-filter ارزان. |
+| `tester.py` | هستهٔ پرفورمنس: batch کردن کانفیگ‌ها در پراسس‌های مشترک xray (هر کانفیگ یک SOCKS inbound). تست در **دو پاس** انجام می‌شود، چون دو کار با نیازهای متضاد است: غربال (پهن، چون اثبات مرده‌بودنِ هزاران نود فقط انتظار است) و اندازه‌گیری (باریک، چون پروبی که پشت بقیه صف بکشد بار خود ما را اندازه می‌گیرد نه شبکه را). تعداد پراسس xray با یک استخر محدودهٔ پورت سقف می‌خورد — همان `parallel_batches`. |
 | `geo.py` | resolve کشور از روی هاست/IP — اول mmdb محلی، بعد fallback به ip-api.com (batched, rate-limit aware). `flag_emoji()`. |
 | `rename.py` | ساخت نام نمایشی نهایی (`zone-vpn-xxxxx` + پرچم) و اسمبل payload خروجی. |
 | `gist.py` | ایجاد/آپدیت گیست. `publish()` بین سه حالت انتخاب می‌کند: امضا‌شدهٔ Ed25519 (اولویت اول) > base64 > JSON خوانا. |

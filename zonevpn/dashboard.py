@@ -433,7 +433,12 @@ async function refresh(){
 
     // current cycle (live)
     const pr=d.progress||{}, th=pr.threads||{};
-    $('cyPhase').textContent=(pr.active?'▶ ':'')+(pr.phase||'idle');
+    // the test phase runs in two passes with very different shapes, so say
+    // which one is on screen - otherwise the bar appears to restart at 0.
+    const stage = pr.stage==='screen' ? ' · screening (wide)'
+                : pr.stage==='measure' ? ' · measuring (accurate)' : '';
+    $('cyPhase').textContent=(pr.active?'▶ ':'')+(pr.phase||'idle')
+      +(pr.phase==='testing'?stage:'');
     $('cyThreads').textContent= th.measure_concurrency!=null
       ? ('threads: '+th.measure_concurrency+' probes · '+th.parallel_batches+' batches × '+th.batch_size)
       : '';

@@ -147,6 +147,7 @@ async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
     alive = _ensure_manual(alive, manual_by_key)
     log.info("alive after testing: %d / %d (%.1fs)",
              len(alive), reachable, time.monotonic() - t0)
+    _log_source_yield(configs, alive)
     if not alive and tester.filtered_out:
         # Everything healthy failed the censorship check. Far likelier that the
         # check is broken here than that every working server simultaneously
@@ -255,6 +256,32 @@ async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
     _progress("idle", active=False, published=payload.get("count", len(alive)),
               duration_s=round(time.monotonic() - t0, 1))
     return ok
+
+
+def _log_source_yield(tested: List[ParsedConfig],
+                      alive: List[ParsedConfig]) -> None:
+    """Report what each source was worth this cycle.
+
+    Raw link counts say nothing: these repositories copy from each other, and
+    the biggest of them can contribute nothing the pool does not already have.
+    What is worth knowing is how many *working* servers a source is the origin
+    of, which is the only basis on which to add or drop one. Credit goes to the
+    source that listed an endpoint first (see [sources.collect]).
+    """
+    if not tested:
+        return
+    total: dict = {}
+    won: dict = {}
+    for c in tested:
+        src = c.extra.get("src", "?")
+        total[src] = total.get(src, 0) + 1
+    for c in alive:
+        src = c.extra.get("src", "?")
+        won[src] = won.get(src, 0) + 1
+    rows = sorted(total.items(), key=lambda kv: (-won.get(kv[0], 0), -kv[1]))
+    for src, n in rows:
+        log.info("source yield: %5d alive / %5d tested  %s",
+                 won.get(src, 0), n, src)
 
 
 def _reliability_of(c: ParsedConfig) -> float:

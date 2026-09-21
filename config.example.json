@@ -1,58 +1,67 @@
 {
   "_comment": "Copy this file to config.json (the setup wizard does it for you). DO NOT commit config.json - it contains your GitHub token.",
-
   "sources": [
-    "https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/main/V2Ray-Config-By-EbraSha.txt",
     "https://raw.githubusercontent.com/barry-far/V2ray-config/main/All_Configs_Sub.txt",
-    "https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/All_Configs_Sub.txt",
-    "https://raw.githubusercontent.com/MatinGhanbari/v2ray-configs/main/subscriptions/v2ray/all_sub.txt"
+    "https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/All_Configs_base64_Sub.txt",
+    "https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/sub_merge.txt",
+    "https://raw.githubusercontent.com/MatinGhanbari/v2ray-configs/main/subscriptions/v2ray/all_sub.txt",
+    "https://raw.githubusercontent.com/LalatinaHub/Mineral/master/result/nodes",
+    "https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/main/V2Ray-Config-By-EbraSha.txt",
+    "https://raw.githubusercontent.com/ALIILAPRO/v2rayNG-Config/main/sub.txt",
+    "https://raw.githubusercontent.com/MahanKenway/Freedom-V2Ray/main/configs/mix.txt",
+    "https://raw.githubusercontent.com/w1770946466/Auto_proxy/main/Long_term_subscription_num",
+    "https://raw.githubusercontent.com/sun9426/sun9426.github.io/main/subscribe/v2ray.txt",
+    "https://raw.githubusercontent.com/miladtahanian/Config-Collector/main/mixed_iran.txt",
+    "https://raw.githubusercontent.com/MohammadBahemmat/V2ray-Collector/main/all_servers.txt",
+    "https://raw.githubusercontent.com/Leon406/SubCrawler/main/sub/share/ss",
+    "https://raw.githubusercontent.com/V2RayRoot/V2RayConfig/main/Config/vless.txt",
+    "https://raw.githubusercontent.com/V2RayRoot/V2RayConfig/main/Config/shadowsocks.txt",
+    "https://raw.githubusercontent.com/Mahdi0024/ProxyCollector/master/sub/proxies.txt",
+    "https://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/v2ray.txt",
+    "https://raw.githubusercontent.com/Kwinshadow/TelegramV2rayCollector/main/sublinks/mix.txt",
+    "https://raw.githubusercontent.com/Roosterkid/openproxylist/main/V2RAY_RAW.txt",
+    "https://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub"
   ],
-
   "github_token": "",
   "gist_id": "",
   "gist_filename": "zone-vpn.json",
   "gist_base64": true,
-
   "_signing_comment": "Optional anti-spoofing. Run `python generate_keys.py`, put the PRIVATE key here and the PUBLIC key in the app. Leave empty to publish unsigned (current behaviour).",
   "ed25519_private_key": "",
   "ed25519_private_key_file": "",
-
   "name_prefix": "zone-vpn",
-
   "_interval_comment": "How often a full collect/test/publish cycle starts, so dead servers drop and new ones appear. 5 = every 5 min. Cycles never overlap: if one runs longer than this (likely at 10k configs with tcp_prefilter off), the next just starts right after it finishes.",
   "interval_minutes": 5,
-
   "_dashboard_comment": "Local web console (logs, server table, delete, update). install.sh fills in a random dashboard_token. Open http://SERVER_IP:8787/?token=THE_TOKEN. Empty token = no auth (only behind a firewall/SSH tunnel).",
   "dashboard_host": "0.0.0.0",
   "dashboard_port": 8787,
   "dashboard_token": "",
-
   "xray_path": "auto",
   "geoip_db": "GeoLite2-Country.mmdb",
-
   "test": {
-    "tls_allow_insecure": true,
-
     "_tcp_prefilter_comment": "OFF: a raw TCP connect from Iran falsely drops many working CDN/domain-fronted configs (they only work through xray with proper SNI/routing). Skipping it tests everything via xray -> more real servers, at the cost of a slower cycle.",
     "tcp_prefilter": false,
     "tcp_timeout": 3,
     "tcp_concurrency": 256,
-
+    "tls_allow_insecure": true,
     "test_url": "https://www.google.com/generate_204",
-    "expected_status": [204, 200],
+    "expected_status": [
+      204,
+      200
+    ],
     "timeout": 5,
-    "batch_size": 100,
-    "parallel_batches": 4,
+    "_concurrency_comment": "Testing runs in two passes. SCREENING is wide and shallow: one probe per endpoint, no extras, screen_concurrency at a time. Almost every endpoint in the pool is dead or blocked from Iran, and proving that is a socket on a timeout rather than CPU, so running many at once is nearly free and the delays it sees are discarded. MEASURING then runs only over what answered, measure_concurrency at a time, and that number must stay LOW or every ping is really a measure of our own load. parallel_batches is the number of xray processes allowed to exist at once, each holding batch_size SOCKS inbounds - on a 2-core/2GB VPS, 6x50 is comfortable and 10x100 is not.",
+    "screen_concurrency": 128,
+    "screen_timeout": 6,
+    "parallel_batches": 6,
+    "batch_size": 50,
+    "measure_concurrency": 16,
+    "ping_samples": 2,
     "base_port": 20000,
     "max_ping": 1500,
-
     "_publish_comment": "Only servers whose real measured delay is <= publish_max_ping (ms) are published to the gist. Keeps the app's list genuinely fast. max_ping is the looser test-time cutoff (kept a little above publish_max_ping so a borderline server's warm sample can still qualify); publish_max_ping is the strict publish cutoff that actually decides what ships.",
     "publish_max_ping": 800,
-
-    "_accuracy_comment": "measure_concurrency caps how many delay probes run at once across ALL batches. This is what keeps pings ACCURATE: too high saturates the server and every ping is wrong. 24-48 is a good range on a normal VPS; lower = more accurate but slower. ping_samples re-probes each survivor and keeps the fastest (min) so a one-off spike doesn't misrank a good server.",
-    "measure_concurrency": 32,
-    "ping_samples": 2,
-
+    "_accuracy_comment": "measure_concurrency caps how many probes run at once in the MEASURING pass, and it is what keeps pings honest: too high and every probe queues behind the others, so a 100ms server reads as 2000ms. 12-24 on a small VPS. Each survivor gets one unmeasured warm-up request first (a fresh tunnel pays for the TCP connect and the TLS handshake, which is not what we want to publish) and then ping_samples measured ones, keeping the fastest.",
     "_censored_comment": "THE important check. test_url is a Google 204, and Google is not blocked here — fine for latency, useless as proof that a config gets past the filter: one whose outbound quietly degrades to direct passes it and gets published. Every survivor is now also asked for a destination this network BLOCKS, through the same tunnel; only a real tunnel can answer. Several targets, first one to answer wins. Set require_censored false to go back to the old behaviour.",
     "require_censored": true,
     "censored_urls": [
@@ -62,24 +71,21 @@
       "https://www.instagram.com/favicon.ico"
     ],
     "censored_timeout": 6,
-
     "_throughput_comment": "A node that handshakes and then trickles is alive and useless. min_kbps > 0 downloads throughput_bytes through each surviving tunnel and drops anything slower. OFF by default because it costs real bandwidth on this VPS: throughput_bytes per survivor, every cycle (300 survivors x 64 KB x 12 cycles/hour is about 230 MB/hour). 50-100 is a sane value if you turn it on.",
     "min_kbps": 0,
     "throughput_url": "https://speed.cloudflare.com/__down?bytes=65536",
     "throughput_bytes": 65536,
     "throughput_timeout": 10,
-
     "_reliability_comment": "One cycle is a snapshot, and free nodes are not stable at that timescale: one that passes now and dies in four minutes still reaches a user as a working server. Each endpoint keeps the outcome of its last reliability_window cycles in state/reliability.json; anything below min_reliability is not published, and the list is ordered by that score before latency. A node is never judged on its score until it has reliability_min_samples cycles of history, so newly found servers are never locked out. min_reliability 0 disables the filter (the score is still recorded and still sorts).",
     "reliability_window": 6,
     "min_reliability": 0.5,
     "reliability_min_samples": 3,
-
     "_geo_comment": "geo_via_tunnel asks Cloudflare's trace endpoint THROUGH each tunnel to learn the real exit IP + country, so CDN-fronted/chained configs get the correct flag (not the misleading address-based country). Turn off only if it slows the cycle too much.",
     "geo_via_tunnel": true,
     "trace_url": "https://www.cloudflare.com/cdn-cgi/trace",
-
     "max_configs_to_test": 0,
     "max_output": 300,
     "min_per_country": 0
-  }
+  },
+  "_sources_comment": "Chosen on measured contribution, not on how many links a file advertises: these repos copy from each other, so several of the biggest add nothing the pool already has. Audited from the server (12133 unique endpoints across this list); anything whose every endpoint was already covered by another source was dropped. Every cycle logs `source yield: N alive / M tested` per source, which is the number to add or drop one on. Unchanged files cost nothing to re-check - the fetcher is conditional (ETag/304)."
 }

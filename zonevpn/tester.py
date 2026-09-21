@@ -63,6 +63,19 @@ class Tester:
         # never pay for extra samples.
         self.ping_samples: int = max(1, int(cfg.get("ping_samples", 2)))
 
+        # --- The screening pass ---------------------------------------------
+        #
+        # Wide on purpose. Nearly every config in the pool is dead or blocked
+        # from here, and finding that out costs a socket sitting on a timeout,
+        # not a core - so running many at once buys throughput almost for free,
+        # and the pings it sees are garbage we throw away anyway.
+        self.screen_concurrency: int = int(cfg.get("screen_concurrency", 96))
+        # And patient on purpose: a cold TLS handshake to a distant node from
+        # Iran is routinely seconds, and anything dropped here is never
+        # measured at all. Defaults to `timeout`, the looser of the two.
+        self.screen_timeout: float = float(
+            cfg.get("screen_timeout", 0) or 0) or self.timeout
+
         # --- Does the tunnel actually get past the filter? ------------------
         #
         # `test_url` defaults to a Google 204, and Google is not blocked here.
@@ -106,6 +119,11 @@ class Tester:
 
         # Created in run(), bound to the running event loop.
         self._measure_sem: Optional[asyncio.Semaphore] = None
+        # Free port ranges; holding one is what entitles a batch to an xray
+        # process, so its size is the real process limit. See [_run_batch].
+        self._ports: Optional[asyncio.Queue] = None
+        # Which pass is running: "screen" or "measure".
+        self._mode: str = "measure"
 
         # Live progress (for the dashboard). Reset at the start of every run().
         self._progress_cb: Optional[Callable[[dict], None]] = None
@@ -156,44 +174,76 @@ class Tester:
 
     async def run(self, configs: List[ParsedConfig],
                   progress_cb: Optional[Callable[[dict], None]] = None) -> List[ParsedConfig]:
-        # Global cap on simultaneous delay probes (accuracy, see __init__).
-        self._measure_sem = asyncio.Semaphore(self.measure_concurrency)
+        """Screen everything cheaply, then measure the few that answered.
 
-        # Reset live-progress state for this run.
+        ## Why two passes
+
+        One pass has to pick a single concurrency, and the two jobs it is doing
+        want opposite values. Proving that 7000 mostly-dead endpoints are dead
+        is almost entirely waiting — the cost of a blackholed address is a
+        timeout, not a core — so it wants to run wide. Measuring what a live
+        server's round trip really is wants to run narrow, because a probe that
+        queues behind other probes measures this machine's load, not the
+        network's.
+
+        At one number, whichever is chosen is wrong for half the work: wide
+        gives quick cycles and meaningless pings, narrow gives honest pings and
+        a cycle that never finishes. So the endpoints are screened wide with a
+        single probe and nothing else, and only the few hundred that answered
+        are measured narrow — samples, censorship check and exit lookup all
+        happen there, on a list small enough to afford them.
+        """
         self._progress_cb = progress_cb
-        self._total = len(configs)
-        self._tested = 0
-        self._alive = 0
-        self._recent = []
         self._last_emit = 0.0
         self.filtered_out = []
 
-        batches = [configs[i:i + self.batch_size] for i in range(0, len(configs), self.batch_size)]
-        sem = asyncio.Semaphore(self.parallel_batches)
-        results: List[List[ParsedConfig]] = [None] * len(batches)  # type: ignore
+        # One disjoint port range per concurrently running xray, handed out and
+        # handed back. This *is* the process limit — see [_run_batch].
+        self._ports = asyncio.Queue()
+        for i in range(max(1, self.parallel_batches)):
+            self._ports.put_nowait(self.base_port + i * (self.batch_size + 5))
 
-        async def worker(slot: int, idx: int, batch: List[ParsedConfig]):
-            async with sem:
-                # disjoint port range per slot so parallel batches never collide
-                port_base = self.base_port + slot * (self.batch_size + 5)
-                results[idx] = await self._run_batch(batch, port_base)
+        # -- pass 1: screening ------------------------------------------------
+        self._begin("screen", len(configs))
+        self._measure_sem = asyncio.Semaphore(self.screen_concurrency)
+        answered = await self._sweep(configs)
+        log.info("screening: %d of %d endpoints answered", len(answered), len(configs))
 
-        tasks = []
-        for idx, batch in enumerate(batches):
-            slot = idx % self.parallel_batches
-            tasks.append(asyncio.create_task(worker(slot, idx, batch)))
+        # -- pass 2: measuring ------------------------------------------------
+        self._begin("measure", len(answered))
+        self._measure_sem = asyncio.Semaphore(self.measure_concurrency)
+        alive = await self._sweep(answered)
+
+        self._emit_progress(force=True)
+        alive.sort(key=lambda c: c.ping)
+        return alive
+
+    def _begin(self, mode: str, total: int) -> None:
+        """Reset the live counters for a pass."""
+        self._mode = mode
+        self._total = total
+        self._tested = 0
+        self._alive = 0
+        self._recent = []
+
+    async def _sweep(self, configs: List[ParsedConfig]) -> List[ParsedConfig]:
+        """Put every config through a batched xray once, in the current mode."""
+        if not configs:
+            return []
+        batches = [configs[i:i + self.batch_size]
+                   for i in range(0, len(configs), self.batch_size)]
         # return_exceptions=True so one batch blowing up (e.g. the OS refusing a
         # new xray process under load) loses only that batch, not the whole
         # cycle. The good batches still publish.
-        outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+        outcomes = await asyncio.gather(
+            *[self._run_batch(b) for b in batches], return_exceptions=True)
+        out: List[ParsedConfig] = []
         for o in outcomes:
             if isinstance(o, BaseException):
                 log.warning("a test batch failed (skipped): %r", o)
-
-        self._emit_progress(force=True)
-        alive = [c for sub in results if sub for c in sub]
-        alive.sort(key=lambda c: c.ping)
-        return alive
+            elif o:
+                out.extend(o)
+        return out
 
     def _record(self, result: Optional[ParsedConfig]) -> None:
         """Update live counters after a single config has been probed."""
@@ -218,6 +268,7 @@ class Tester:
         self._last_emit = now
         try:
             self._progress_cb({
+                "stage": self._mode,
                 "tested": self._tested,
                 "total": self._total,
                 "alive": self._alive,
@@ -227,52 +278,100 @@ class Tester:
             pass
 
     # ------------------------------------------------------------------ #
-    async def _run_batch(self, batch: List[ParsedConfig], port_base: int) -> List[ParsedConfig]:
+    async def _run_batch(self, batch: List[ParsedConfig]) -> List[ParsedConfig]:
+        """One xray process exposing one SOCKS inbound per config in `batch`.
+
+        ## The port range is the process limit
+
+        Every xray started here holds a range from `_ports` for exactly as long
+        as it runs, so the number of live processes cannot exceed the number of
+        ranges — `parallel_batches`, which is what that setting has always
+        claimed to mean.
+
+        It did not mean that before. The limit was a semaphore held by the
+        *caller*, and the split-and-retry path at the bottom of this method
+        recursed underneath it: a batch of 100 that failed to start became 2,
+        then 4, then 8 concurrent xray processes, none of them counted against
+        anything. On a 2-core VPS that is self-sustaining — the uncounted
+        processes make the next batch miss its startup deadline, which splits
+        that one too. Measured on the live server before this change: 239 xray
+        processes against a configured limit of 10, and 4 configs surviving a
+        cycle out of 7107.
+
+        The range is released *before* recursing, so a split never waits on a
+        slot its own parent is holding.
+        """
         if not batch:
             return []
 
+        port_base = await self._ports.get()
         config_path = self._write_batch_config(batch, port_base)
         proc = None
-        started = False
+        died = False
         try:
             proc = await asyncio.create_subprocess_exec(
                 self.xray_path, "run", "-c", config_path,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
-            started = await self._wait_ready(port_base, proc)
-            if started:
-                tasks = [self._test_one(port_base + i, cfg) for i, cfg in enumerate(batch)]
-                tested = await asyncio.gather(*tasks)
+            ready = await self._wait_ready(port_base, proc, len(batch))
+            if ready == "ok":
+                tested = await asyncio.gather(
+                    *[self._test_one(port_base + i, cfg)
+                      for i, cfg in enumerate(batch)])
                 return [c for c in tested if c is not None]
+            died = (ready == "died")
+            if not died:
+                # Running, just not listening yet: the machine is busy, the
+                # config is not broken. Splitting here is exactly what caused
+                # the meltdown above, so do not — the next cycle retries it.
+                log.warning("xray did not come up in time for %d configs "
+                            "(busy — batch skipped, not split)", len(batch))
         finally:
-            if proc and proc.returncode is None:
-                try:
-                    proc.terminate()
-                    await asyncio.wait_for(proc.wait(), timeout=5)
-                except (ProcessLookupError, asyncio.TimeoutError):
-                    try:
-                        proc.kill()
-                    except ProcessLookupError:
-                        pass
+            await self._stop(proc)
             try:
                 os.unlink(config_path)
             except OSError:
                 pass
+            self._ports.put_nowait(port_base)
 
-        # Startup failed: one (or more) configs in this batch are unparseable by
-        # xray. Isolate them by splitting the batch and retrying each half, so a
-        # single bad config never wastes a whole batch of good ones. The halves
-        # run concurrently on disjoint port ranges (right offset by mid) so deep
-        # splits stay fast instead of adding up serially.
-        if len(batch) == 1:
-            return []  # the lone config can't start -> drop it
+        # xray rejected the config outright, which means one or more links in
+        # this batch are unparseable by this build. Halve it to isolate them, so
+        # a single bad config never costs a batch of good ones.
+        if not died or len(batch) == 1:
+            return []
         mid = len(batch) // 2
         left, right = await asyncio.gather(
-            self._run_batch(batch[:mid], port_base),
-            self._run_batch(batch[mid:], port_base + mid),
+            self._run_batch(batch[:mid]),
+            self._run_batch(batch[mid:]),
         )
         return left + right
+
+    async def _stop(self, proc) -> None:
+        """Terminate, and be sure it is gone before its ports are handed on."""
+        if proc is None or proc.returncode is not None:
+            return
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            return
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5)
+            return
+        except asyncio.TimeoutError:
+            pass
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            return
+        # Wait again after the kill. Without this the port range returns to the
+        # pool while the old process may still hold its listeners, and the next
+        # xray fails to bind — which is indistinguishable, from the outside,
+        # from a batch full of bad configs.
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            log.warning("an xray process ignored SIGKILL; its ports are in use")
 
     def _write_batch_config(self, batch: List[ParsedConfig], port_base: int) -> str:
         inbounds, outbounds, rules = [], [], []
@@ -302,17 +401,21 @@ class Tester:
             json.dump(xray_cfg, fh)
         return path
 
-    async def _wait_ready(self, port_base: int, proc) -> bool:
-        """Wait until the first inbound accepts a TCP connection (xray is up).
+    async def _wait_ready(self, port_base: int, proc, size: int) -> str:
+        """Wait for the first inbound to accept. Returns "ok", "died" or "busy".
 
-        Fails fast: if xray rejected the config it exits within ~200ms, so we
-        detect the dead process immediately instead of polling for the full
-        deadline. This keeps the split-on-failure path cheap.
+        The caller needs the reason, not a boolean. A process that *exited*
+        rejected its config, and halving the batch will find the culprit. A
+        process that is still running simply has not been scheduled yet, and
+        halving that one adds load to a machine that already has too much.
+
+        The deadline scales with the batch because the startup cost does: xray
+        binds one listener per config in it.
         """
-        deadline = time.monotonic() + 4
+        deadline = time.monotonic() + 3.0 + 0.05 * size
         while time.monotonic() < deadline:
             if proc.returncode is not None:  # xray died (bad config) -> stop early
-                return False
+                return "died"
             try:
                 _, writer = await asyncio.wait_for(
                     asyncio.open_connection("127.0.0.1", port_base), timeout=0.4
@@ -322,24 +425,73 @@ class Tester:
                     await writer.wait_closed()
                 except Exception:
                     pass
-                return True
+                return "ok"
             except Exception:
                 await asyncio.sleep(0.1)
-        return False
+        return "died" if proc.returncode is not None else "busy"
 
     async def _test_one(self, port: int, cfg: ParsedConfig) -> Optional[ParsedConfig]:
-        # Global throttle: only `measure_concurrency` probes run at once, so each
-        # measured ping reflects the server's real latency, not server load.
+        # Global throttle. In the screening pass this is wide (the work is
+        # waiting); in the measuring pass it is narrow, so that each measured
+        # ping reflects the server's real latency and not our own load.
         assert self._measure_sem is not None
         async with self._measure_sem:
-            connector = None
-            result: Optional[ParsedConfig] = None
-            try:
-                connector = ProxyConnector.from_url(f"socks5://127.0.0.1:{port}")
-                timeout = aiohttp.ClientTimeout(total=self.probe_timeout)
-                best: Optional[int] = None
-                ok = True
-                async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+            if self._mode == "screen":
+                return await self._screen_one(port, cfg)
+            return await self._measure_one(port, cfg)
+
+    async def _screen_one(self, port: int, cfg: ParsedConfig) -> Optional[ParsedConfig]:
+        """Does anything at all come back through this tunnel?
+
+        One probe, a generous timeout, nothing else. The only question here is
+        whether this endpoint is worth measuring properly, and the answer is
+        wrong far more often for being impatient than for being slow: a node
+        that needs four seconds for a cold TLS handshake from Iran can still be
+        a 120 ms server once the tunnel is up. Whatever delay this pass sees is
+        thrown away — it was taken under deliberate contention.
+        """
+        connector = None
+        result: Optional[ParsedConfig] = None
+        try:
+            connector = ProxyConnector.from_url(f"socks5://127.0.0.1:{port}")
+            timeout = aiohttp.ClientTimeout(total=self.screen_timeout)
+            async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+                async with session.get(self.test_url, allow_redirects=False) as resp:
+                    await resp.read()
+                    if resp.status in self.expected:
+                        result = cfg
+        except Exception:
+            result = None
+        finally:
+            if connector is not None:
+                await connector.close()
+            self._record(result)
+        return result
+
+    async def _measure_one(self, port: int, cfg: ParsedConfig) -> Optional[ParsedConfig]:
+        connector = None
+        result: Optional[ParsedConfig] = None
+        try:
+            connector = ProxyConnector.from_url(f"socks5://127.0.0.1:{port}")
+            timeout = aiohttp.ClientTimeout(total=self.probe_timeout)
+            best: Optional[int] = None
+            ok = True
+            async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+                # Warm-up, deliberately not measured. This is a fresh xray and a
+                # fresh tunnel: the first request pays for the TCP connect, the
+                # TLS handshake with the node, and the node's own connection
+                # onwards. Ranking servers on that number ranks them by distance
+                # twice, and it is the number the old single-pass tester was
+                # publishing.
+                async with session.get(
+                        self.test_url, allow_redirects=False,
+                        timeout=aiohttp.ClientTimeout(total=self.screen_timeout)
+                ) as resp:
+                    await resp.read()
+                    if resp.status not in self.expected:
+                        ok = False
+
+                if ok:
                     for _ in range(self.ping_samples):
                         start = time.monotonic()
                         async with session.get(self.test_url, allow_redirects=False) as resp:
@@ -350,40 +502,42 @@ class Tester:
                         ping = int((time.monotonic() - start) * 1000)
                         if best is None or ping < best:
                             best = ping
-                    usable = ok and best is not None and 0 < best <= self.max_ping
 
-                    # Order matters: the cheap latency probe has already ruled
-                    # out most configs, so only the survivors pay for the rest.
-                    if usable and self.require_censored:
-                        if not await self._passes_filter(session):
-                            # Healthy and quick, and unable to reach anything
-                            # this network blocks — so it is not a way out of
-                            # it. Set aside rather than discarded: if *every*
-                            # config lands here then the check itself is what
-                            # is broken, and the runner falls back to this list
-                            # instead of publishing nothing.
-                            cfg.ping = best
-                            self.filtered_out.append(cfg)
-                            usable = False
+                usable = ok and best is not None and 0 < best <= self.max_ping
 
-                    if usable and self.min_kbps > 0:
-                        kbps = await self._measure_kbps(session)
-                        cfg.extra["kbps"] = int(kbps)
-                        usable = kbps >= self.min_kbps
-
-                    if usable:
+                # Order matters: the cheap latency probe has already ruled
+                # out most configs, so only the survivors pay for the rest.
+                if usable and self.require_censored:
+                    if not await self._passes_filter(session):
+                        # Healthy and quick, and unable to reach anything
+                        # this network blocks — so it is not a way out of
+                        # it. Set aside rather than discarded: if *every*
+                        # config lands here then the check itself is what
+                        # is broken, and the runner falls back to this list
+                        # instead of publishing nothing.
                         cfg.ping = best
-                        # Reuse the same tunnel for the real exit IP/country.
-                        if self.geo_via_tunnel:
-                            await self._annotate_exit(session, cfg)
-                        result = cfg
-            except Exception:
-                result = None
-            finally:
-                if connector is not None:
-                    await connector.close()
-                self._record(result)
-            return result
+                        self.filtered_out.append(cfg)
+                        usable = False
+
+                if usable and self.min_kbps > 0:
+                    kbps = await self._measure_kbps(session)
+                    cfg.extra["kbps"] = int(kbps)
+                    usable = kbps >= self.min_kbps
+
+                if usable:
+                    cfg.ping = best
+                    # Reuse the same tunnel for the real exit IP/country.
+                    if self.geo_via_tunnel:
+                        await self._annotate_exit(session, cfg)
+                    result = cfg
+        except Exception:
+            result = None
+        finally:
+            if connector is not None:
+                await connector.close()
+            self._record(result)
+        return result
+
 
     async def _passes_filter(self, session) -> bool:
         """True as soon as one blocked destination answers through the tunnel.
