@@ -273,18 +273,26 @@ def _select_for_testing(test_cfg: dict,
     here - `configs[:limit]` - was the worst one available, because it tested
     the same prefix every cycle and never looked at the rest at all.
 
-    Two groups instead:
+    Three groups, in order of what they are worth:
 
       * everything with a track record, tested every cycle without exception.
         That is the published list and its near misses, it is small (tens), and
         re-verifying it is the whole job - a server that stopped working has to
         leave the list quickly.
-      * plus a rotating window over the unproven remainder, so discovery
-        continues and a source that has produced nothing so far still gets its
-        turn, just not at the cost of the list's freshness.
+      * then whole sources, best first, until half the budget is spent. A
+        source's worth is how many of the endpoints it offers have ever proved
+        themselves, and measured over six cycles that ratio spans two orders of
+        magnitude: one repo ran at 20% and another returned nothing from 12989
+        tested endpoints. Splitting the budget evenly across the pool spends
+        almost all of it on the second kind. The first plain rotation did
+        exactly that and tested 3 of the best source's 24 configs.
+      * and a rotating window over everything left, so the warehouses are still
+        swept and a new source can still prove itself - just not at the cost of
+        the list.
 
-    A node the window finds joins the first group next cycle, so anything that
-    works is measured continuously from then on.
+    Sources nothing has ever come from are ordered smallest first, so a new
+    small repo gets a full trial within a cycle or two instead of waiting for
+    the rotation to reach it.
     """
     limit = int(test_cfg.get("max_configs_to_test", 0) or 0)
     if not limit or len(configs) <= limit:
@@ -292,31 +300,68 @@ def _select_for_testing(test_cfg: dict,
 
     rel = Reliability.load(int(test_cfg.get("reliability_window", 6) or 6))
 
-    proven, rest = [], []
-    for c in configs:
+    def proved(c: ParsedConfig) -> bool:
         key = state.block_key(c.address, c.port)
-        if c.manual or (rel.samples(key) > 0 and rel.score(key) > 0):
+        return rel.samples(key) > 0 and rel.score(key) > 0
+
+    proven: List[ParsedConfig] = []
+    by_src: dict = {}
+    for c in configs:
+        if c.manual or proved(c):
             proven.append(c)
         else:
-            rest.append(c)
+            by_src.setdefault(c.extra.get("src", "?"), []).append(c)
 
-    take = max(0, limit - len(proven))
-    if not rest or take <= 0:
+    budget = limit - len(proven)
+    if not by_src or budget <= 0:
         log.info("testing %d known-good config(s) only; the pool is %d",
                  len(proven), len(configs))
         return proven
 
-    cursor = state.read_cursor() % len(rest)
-    window = rest[cursor:cursor + take]
-    if len(window) < take:                     # wrap around the end
-        window += rest[:take - len(window)]
-    state.write_cursor((cursor + len(window)) % len(rest))
+    # What each source has been worth: proven endpoints per endpoint offered.
+    earned: dict = {}
+    for c in proven:
+        src = c.extra.get("src", "?")
+        earned[src] = earned.get(src, 0) + 1
+    def worth(src: str) -> tuple:
+        offered = len(by_src[src]) + earned.get(src, 0)
+        rate = earned.get(src, 0) / offered
+        # Unproven sources tie at 0; prefer the small ones, they are cheap to
+        # settle either way.
+        return (-rate, len(by_src[src]))
 
-    log.info("testing %d of %d: %d with a track record + %d unproven "
-             "(rotating, from #%d of %d)",
-             len(proven) + len(window), len(configs), len(proven),
-             len(window), cursor, len(rest))
-    return proven + window
+    ranked = sorted(by_src, key=worth)
+
+    whole: List[ParsedConfig] = []
+    guaranteed = budget // 2
+    taken = []
+    for src in ranked:
+        group = by_src[src]
+        if len(whole) + len(group) > guaranteed:
+            # Skip rather than stop: a big source should not block the smaller
+            # ones behind it out of the guarantee. It still gets swept below.
+            continue
+        whole.extend(group)
+        taken.append(src)
+    for src in taken:
+        del by_src[src]
+
+    rest = [c for src in ranked if src in by_src for c in by_src[src]]
+    take = max(0, budget - len(whole))
+    window: List[ParsedConfig] = []
+    if rest and take:
+        cursor = state.read_cursor() % len(rest)
+        window = rest[cursor:cursor + take]
+        if len(window) < take:                     # wrap around the end
+            window += rest[:take - len(window)]
+        state.write_cursor((cursor + len(window)) % len(rest))
+
+    log.info("testing %d of %d: %d proven + %d from %d source(s) that produce "
+             "+ %d rotating of %d",
+             len(proven) + len(whole) + len(window), len(configs),
+             len(proven), len(whole), len(taken),
+             len(window), len(rest))
+    return proven + whole + window
 
 
 def _log_source_yield(tested: List[ParsedConfig],
