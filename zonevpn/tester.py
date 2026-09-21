@@ -63,6 +63,41 @@ class Tester:
         # never pay for extra samples.
         self.ping_samples: int = max(1, int(cfg.get("ping_samples", 2)))
 
+        # --- Does the tunnel actually get past the filter? ------------------
+        #
+        # `test_url` defaults to a Google 204, and Google is not blocked here.
+        # That makes it a fine latency probe and a poor *censorship* probe: a
+        # config whose outbound quietly degrades to something direct, or whose
+        # proxy is up but only reaches the open internet, passes it and gets
+        # published. Measured from the app's side, a large share of published
+        # nodes accepted a TCP connect in ~50 ms and then carried nothing the
+        # user cared about.
+        #
+        # So every survivor is asked for something this network *blocks*. Only
+        # the tunnel can produce that answer, which is the whole point. Several
+        # targets, first one to answer wins: any single site can be slow, rate
+        # limited or having a bad day, and one false negative costs a working
+        # server.
+        self.censored_urls: List[str] = list(cfg.get("censored_urls", [
+            "https://www.youtube.com/generate_204",
+            "https://t.me/s/telegram",
+            "https://x.com/robots.txt",
+            "https://www.instagram.com/favicon.ico",
+        ]))
+        self.require_censored: bool = bool(cfg.get("require_censored", True))
+        self.censored_timeout: float = float(cfg.get("censored_timeout", 6))
+
+        # --- Does it carry at a usable rate? --------------------------------
+        #
+        # A node that handshakes and then trickles is technically alive and
+        # useless. Off by default because it costs real bandwidth on the VPS:
+        # `throughput_bytes` per surviving config, every cycle.
+        self.min_kbps: float = float(cfg.get("min_kbps", 0) or 0)
+        self.throughput_url: str = cfg.get(
+            "throughput_url", "https://speed.cloudflare.com/__down?bytes=65536")
+        self.throughput_bytes: int = int(cfg.get("throughput_bytes", 65536))
+        self.throughput_timeout: float = float(cfg.get("throughput_timeout", 10))
+
         # Bound the wait per probe so a hanging server can't stall the cycle:
         # nothing slower than max_ping can win anyway, so don't wait much past it.
         self.probe_timeout: float = min(
@@ -79,6 +114,14 @@ class Tester:
         self._alive = 0
         self._recent: List[dict] = []
         self._last_emit = 0.0
+
+        # Configs that were fast and healthy but could not reach a blocked
+        # destination. Kept so the runner has something to fall back on if the
+        # censorship check ever rejects *everything* — which would mean the
+        # check itself is broken (all four targets down, or this VPS newly
+        # unable to reach them), not that every server died at once. Publishing
+        # nothing because of our own probe would be a self-inflicted outage.
+        self.filtered_out: List[ParsedConfig] = []
 
     async def tcp_prefilter(self, configs: List[ParsedConfig],
                             timeout: float, concurrency: int) -> List[ParsedConfig]:
@@ -123,6 +166,7 @@ class Tester:
         self._alive = 0
         self._recent = []
         self._last_emit = 0.0
+        self.filtered_out = []
 
         batches = [configs[i:i + self.batch_size] for i in range(0, len(configs), self.batch_size)]
         sem = asyncio.Semaphore(self.parallel_batches)
@@ -307,6 +351,20 @@ class Tester:
                         if best is None or ping < best:
                             best = ping
                     if ok and best is not None and 0 < best <= self.max_ping:
+                        # Fast *and* actually able to get past the filter. The
+                        # order matters: the cheap latency probe rules out most
+                        # configs, so only the survivors pay for this.
+                        if self.require_censored and not await self._passes_filter(session):
+                            ok = False
+                            cfg.ping = best
+                            self.filtered_out.append(cfg)
+                    if ok and best is not None and 0 < best <= self.max_ping:
+                        if self.min_kbps > 0:
+                            kbps = await self._measure_kbps(session)
+                            cfg.extra["kbps"] = int(kbps)
+                            if kbps < self.min_kbps:
+                                ok = False
+                    if ok and best is not None and 0 < best <= self.max_ping:
                         cfg.ping = best
                         # Reuse the same tunnel to learn the real exit IP/country.
                         if self.geo_via_tunnel:
@@ -319,6 +377,55 @@ class Tester:
                     await connector.close()
                 self._record(result)
             return result
+
+    async def _passes_filter(self, session) -> bool:
+        """True as soon as one blocked destination answers through the tunnel.
+
+        Raced rather than tried in turn: a dead target must not spend the whole
+        budget, and the first success is all the evidence there is to get.
+        """
+        if not self.censored_urls:
+            return True
+
+        async def probe(url: str) -> bool:
+            try:
+                timeout = aiohttp.ClientTimeout(total=self.censored_timeout)
+                async with session.get(url, allow_redirects=False,
+                                       timeout=timeout) as resp:
+                    # Any answer at all means bytes crossed the tunnel; a 403
+                    # from a site that dislikes our user agent still proves it.
+                    await resp.read()
+                    return True
+            except Exception:
+                return False
+
+        tasks = [asyncio.ensure_future(probe(u)) for u in self.censored_urls]
+        try:
+            for fut in asyncio.as_completed(tasks):
+                if await fut:
+                    return True
+            return False
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+
+    async def _measure_kbps(self, session) -> float:
+        """Rough download rate through the tunnel, in kilobytes per second."""
+        try:
+            timeout = aiohttp.ClientTimeout(total=self.throughput_timeout)
+            start = time.monotonic()
+            read = 0
+            async with session.get(self.throughput_url, allow_redirects=True,
+                                   timeout=timeout) as resp:
+                async for chunk in resp.content.iter_chunked(16384):
+                    read += len(chunk)
+                    if read >= self.throughput_bytes:
+                        break
+            elapsed = max(1e-3, time.monotonic() - start)
+            return (read / 1024.0) / elapsed
+        except Exception:
+            return 0.0
 
     async def _annotate_exit(self, session, cfg: ParsedConfig) -> None:
         """Best-effort: read the true egress IP + country through the tunnel.

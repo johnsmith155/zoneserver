@@ -11,6 +11,7 @@ from . import config as cfgmod
 from . import gist, links, sign, sources, state
 from .geo import GeoResolver
 from .links import ParsedConfig
+from .reliability import Reliability
 from .rename import build_output
 from .tester import Tester
 
@@ -146,8 +147,33 @@ async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
     alive = _ensure_manual(alive, manual_by_key)
     log.info("alive after testing: %d / %d (%.1fs)",
              len(alive), reachable, time.monotonic() - t0)
+    if not alive and tester.filtered_out:
+        # Everything healthy failed the censorship check. Far likelier that the
+        # check is broken here than that every working server simultaneously
+        # stopped circumventing, so take the pre-check result for this cycle
+        # and make the reason loud rather than publishing nothing.
+        log.warning("censorship check rejected ALL %d healthy configs — "
+                    "falling back to the plain result for this cycle; "
+                    "check `censored_urls` reachability from this server",
+                    len(tester.filtered_out))
+        alive = _ensure_manual(list(tester.filtered_out), manual_by_key)
+
     if not alive:
         log.warning("no config passed the test; not publishing")
+        _progress("idle", active=False)
+        return False
+
+    # 3b. fold this cycle's result into each endpoint's short history, then
+    # refuse to publish the ones that keep letting users down.
+    #
+    # The test is a snapshot and these nodes are not stable at that timescale:
+    # one that passes now and dies in four minutes still reaches a user as a
+    # working server. A node has to earn its place over several cycles before
+    # the score is allowed to reject it, so newly discovered ones are never
+    # locked out.
+    alive = _apply_reliability(cfg, configs, alive)
+    if not alive:
+        log.warning("nothing passed the reliability bar; not publishing")
         _progress("idle", active=False)
         return False
 
@@ -194,9 +220,16 @@ async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
         others = _trim(others, keep, int(test_cfg.get("min_per_country", 0) or 0))
         alive = manual_part + others
 
-    # Final order: by real delay ascending; untested/unknown (ping<=0, e.g. a
-    # manual server that didn't pass) sink to the bottom.
-    alive.sort(key=lambda c: c.ping if c.ping and c.ping > 0 else 10 ** 9)
+    # Final order: proven first, then by real delay.
+    #
+    # Sorting on latency alone is what put the least reliable servers at the top
+    # of the user's list: the fastest nodes are the nearest ones, and the
+    # nearest ones are the most likely to be locally throttled. A node with a
+    # track record and 200 ms beats an unknown at 90 ms.
+    alive.sort(key=lambda c: (
+        -_reliability_of(c),
+        c.ping if c.ping and c.ping > 0 else 10 ** 9,
+    ))
 
     # 7. build payload + publish
     _progress("publishing", threads=threads, collected=collected,
@@ -224,6 +257,55 @@ async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
     return ok
 
 
+def _reliability_of(c: ParsedConfig) -> float:
+    """The score stashed on the config in [_apply_reliability]."""
+    try:
+        return float(c.extra.get("reliability", 1.0))
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def _apply_reliability(cfg: dict, tested: List[ParsedConfig],
+                       alive: List[ParsedConfig]) -> List[ParsedConfig]:
+    """Record this cycle's outcome per endpoint and drop the chronic failures.
+
+    Every config that went into the test is recorded, not just the survivors —
+    a failure is the more informative half of the history.
+    """
+    test_cfg = cfg.get("test", {})
+    window = int(test_cfg.get("reliability_window", 6) or 6)
+    min_score = float(test_cfg.get("min_reliability", 0.5) or 0)
+    min_samples = int(test_cfg.get("reliability_min_samples", 3) or 3)
+
+    rel = Reliability.load(window)
+    passed = {state.block_key(c.address, c.port) for c in alive}
+    for c in tested:
+        rel.record(state.block_key(c.address, c.port),
+                   state.block_key(c.address, c.port) in passed)
+
+    kept: List[ParsedConfig] = []
+    dropped = 0
+    for c in alive:
+        key = state.block_key(c.address, c.port)
+        score = rel.score(key)
+        c.extra["reliability"] = round(score, 3)
+        c.extra["reliability_samples"] = rel.samples(key)
+        if c.manual or min_score <= 0 or rel.is_trusted(key, min_score, min_samples):
+            kept.append(c)
+        else:
+            dropped += 1
+    if dropped:
+        log.info("reliability filter (>=%.0f%% of last %d cycles): dropped %d",
+                 min_score * 100, window, dropped)
+
+    rel.prune(state.block_key(c.address, c.port) for c in tested)
+    try:
+        rel.save()
+    except Exception:
+        log.exception("failed to save reliability history (non-fatal)")
+    return kept
+
+
 def _write_state(final: List[ParsedConfig], payload: dict, ok: bool,
                  signed: bool, base64_encoded: bool, duration_s: float) -> None:
     """Persist a decoded snapshot so the dashboard can show readable rows and
@@ -234,6 +316,8 @@ def _write_state(final: List[ParsedConfig], payload: dict, ok: bool,
             servers.append({**item,
                             "exit_ip": parsed.exit_ip,
                             "tcp_ping": parsed.tcp_ping,
+                            "reliability": parsed.extra.get("reliability"),
+                            "kbps": parsed.extra.get("kbps"),
                             "front": f"{parsed.address}:{parsed.port}",
                             "block_key": state.block_key(parsed.address, parsed.port)})
         state.write_servers(servers)

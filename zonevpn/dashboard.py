@@ -351,7 +351,7 @@ _HTML = r"""<!doctype html>
       <div id="manualList"></div>
       <div class="tablewrap">
         <table>
-          <thead><tr><th>#</th><th>Server</th><th>Front (host:port)</th><th>Exit IP</th><th>Country</th><th>Ping</th><th>TCP</th><th>Proto</th><th></th></tr></thead>
+          <thead><tr><th>#</th><th>Server</th><th>Front (host:port)</th><th>Exit IP</th><th>Country</th><th>Ping</th><th>TCP</th><th>Rel</th><th>Proto</th><th></th></tr></thead>
           <tbody id="rows"><tr><td colspan="9" class="muted">loading…</td></tr></tbody>
         </table>
       </div>
@@ -377,6 +377,9 @@ function toast(m){const t=$('toast');t.textContent=m;t.classList.add('show');
   setTimeout(()=>t.classList.remove('show'),2600);}
 
 function pingClass(p){if(p<0)return 'bad';if(p<=300)return 'good';if(p<=900)return 'mid';return 'bad';}
+// A server's track record matters more than its latency: the fastest nodes
+// are the nearest ones, and the nearest ones are the most throttled.
+function relClass(r){if(r==null)return '';if(r>=0.85)return 'good';if(r>=0.5)return 'mid';return 'bad';}
 function ago(iso){if(!iso)return '–';const s=(Date.now()-new Date(iso))/1000;
   if(s<60)return Math.round(s)+'s ago';if(s<3600)return Math.round(s/60)+'m ago';
   return Math.round(s/3600)+'h ago';}
@@ -404,6 +407,7 @@ async function refresh(){
         <td>${s.flag||''} ${s.country||'??'}</td>
         <td class="ping ${pc}">${s.ping<0?'—':s.ping+' ms'}</td>
         <td class=muted>${s.tcp_ping==null||s.tcp_ping<0?'—':s.tcp_ping+' ms'}</td>
+        <td class="ping ${relClass(s.reliability)}" title="share of the last cycles this endpoint passed">${s.reliability==null?'—':Math.round(s.reliability*100)+'%'}</td>
         <td class=muted>${s.protocol||''}</td>
         <td><button class="btn danger" onclick="del('${s.block_key}')">Delete</button></td>
       </tr>`;}).join('');
