@@ -147,6 +147,13 @@ async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
     alive = _ensure_manual(alive, manual_by_key)
     log.info("alive after testing: %d / %d (%.1fs)",
              len(alive), reachable, time.monotonic() - t0)
+    if tester.filtered_out:
+        # Worth its own line even when it is not fatal: these were fast and
+        # healthy and could not reach anything blocked, so they are the
+        # difference between what the tunnel test found and what ships. If this
+        # number ever approaches the whole survivor list, suspect the check.
+        log.info("censorship check rejected %d healthy config(s)",
+                 len(tester.filtered_out))
     _log_source_yield(configs, alive)
     if not alive and tester.filtered_out:
         # Everything healthy failed the censorship check. Far likelier that the
