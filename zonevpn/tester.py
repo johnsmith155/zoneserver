@@ -81,6 +81,15 @@ class Tester:
         self.screen_timeout: float = float(
             cfg.get("screen_timeout", 0) or 0) or self.timeout
 
+        # A second chance for the endpoints that matter. Measured on this
+        # pool: re-screening 54 endpoints known to be working recovers only
+        # about 78% of them on any single pass - not contention (32 at a time
+        # scored no better than 256), just how unsteady these nodes are minute
+        # to minute. One retry takes that to roughly 95%, and it costs one
+        # probe per failure rather than a second pass over the pool, because
+        # only the endpoints the runner marked as worth it are retried.
+        self.screen_retries: int = int(cfg.get("screen_retries", 1))
+
         # How the unparseable configs are found. See [sift].
         self.sift_chunk: int = int(cfg.get("sift_chunk", 200))
         self.sift_concurrency: int = int(cfg.get("sift_concurrency", 4))
@@ -216,7 +225,28 @@ class Tester:
         self._begin("screen", len(configs))
         self._measure_sem = asyncio.Semaphore(self.screen_concurrency)
         answered = await self._sweep(configs)
-        log.info("screening: %d of %d endpoints answered", len(answered), len(configs))
+        first = len(answered)
+
+        # Retry the ones with a track record. A node that worked four minutes
+        # ago and did not answer just now is far more likely to be having a
+        # moment than to have died, and leaving it out costs a server from the
+        # published list for a whole cycle.
+        for _ in range(self.screen_retries):
+            got = {id(c) for c in answered}
+            again = [c for c in configs
+                     if id(c) not in got and c.extra.get("priority")]
+            if not again:
+                break
+            self._total += len(again)
+            answered = answered + await self._sweep(again)
+
+        if len(answered) != first:
+            log.info("screening: %d of %d endpoints answered (%d of them on a "
+                     "retry of known-good ones)",
+                     len(answered), len(configs), len(answered) - first)
+        else:
+            log.info("screening: %d of %d endpoints answered",
+                     len(answered), len(configs))
 
         # -- pass 2: measuring ------------------------------------------------
         self._begin("measure", len(answered))

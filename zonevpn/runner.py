@@ -343,10 +343,6 @@ def _select_for_testing(test_cfg: dict,
     small repo gets a full trial within a cycle or two instead of waiting for
     the rotation to reach it.
     """
-    limit = int(test_cfg.get("max_configs_to_test", 0) or 0)
-    if not limit or len(configs) <= limit:
-        return configs
-
     rel = Reliability.load(int(test_cfg.get("reliability_window", 6) or 6))
 
     def proved(c: ParsedConfig) -> bool:
@@ -357,9 +353,17 @@ def _select_for_testing(test_cfg: dict,
     by_src: dict = {}
     for c in configs:
         if c.manual or proved(c):
+            # Marked before anything else, including the early return below:
+            # the tester gives these a second chance if they do not answer,
+            # and that is worth doing whether or not the pool needs trimming.
+            c.extra["priority"] = True
             proven.append(c)
         else:
             by_src.setdefault(c.extra.get("src", "?"), []).append(c)
+
+    limit = int(test_cfg.get("max_configs_to_test", 0) or 0)
+    if not limit or len(configs) <= limit:
+        return configs
 
     budget = limit - len(proven)
     if not by_src or budget <= 0:
