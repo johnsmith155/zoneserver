@@ -33,6 +33,7 @@ STATUS_FILE = STATE_DIR / "status.json"
 SERVERS_FILE = STATE_DIR / "servers.json"
 BLOCKLIST_FILE = STATE_DIR / "blocklist.json"
 PROGRESS_FILE = STATE_DIR / "progress.json"
+CURSOR_FILE = STATE_DIR / "rotation.json"
 MANUAL_FILE = STATE_DIR / "manual.json"
 LOG_FILE = STATE_DIR / "zonevpn.log"
 
@@ -132,6 +133,21 @@ def write_progress(progress: dict) -> None:
 def read_progress() -> dict:
     data = _read_json(PROGRESS_FILE, {})
     return data if isinstance(data, dict) else {}
+
+
+# --------------------------------------------------------------------------- #
+# rotation cursor (how far through the unproven configs the last cycle got)    #
+# --------------------------------------------------------------------------- #
+def read_cursor() -> int:
+    data = _read_json(CURSOR_FILE, {})
+    try:
+        return max(0, int(data.get("cursor", 0)))
+    except (AttributeError, TypeError, ValueError):
+        return 0
+
+
+def write_cursor(cursor: int) -> None:
+    _atomic_write(CURSOR_FILE, json.dumps({"cursor": max(0, int(cursor))}))
 
 
 # --------------------------------------------------------------------------- #

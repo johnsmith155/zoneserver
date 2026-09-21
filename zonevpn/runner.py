@@ -110,10 +110,8 @@ async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
         if before != len(configs):
             log.info("blocklist: dropped %d server(s)", before - len(configs))
 
-    limit = int(test_cfg.get("max_configs_to_test", 0) or 0)
-    if limit and len(configs) > limit:
-        configs = configs[:limit]
-        log.info("limited to %d configs for testing", limit)
+    pool = configs
+    configs = _select_for_testing(test_cfg, configs)
 
     tester = Tester(xray_path, test_cfg)
 
@@ -179,7 +177,7 @@ async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
     # working server. A node has to earn its place over several cycles before
     # the score is allowed to reject it, so newly discovered ones are never
     # locked out.
-    alive = _apply_reliability(cfg, configs, alive)
+    alive = _apply_reliability(cfg, configs, alive, pool)
     if not alive:
         log.warning("nothing passed the reliability bar; not publishing")
         _progress("idle", active=False)
@@ -265,6 +263,62 @@ async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
     return ok
 
 
+def _select_for_testing(test_cfg: dict,
+                        configs: List[ParsedConfig]) -> List[ParsedConfig]:
+    """Which of the pool to test this cycle, when it is too big to finish.
+
+    Cycle time is the freshness of the published list: these nodes die in
+    minutes, so a list rebuilt every twenty is half wrong by the time the app
+    reads it. On a 2-core box the pool outgrew the interval, and the old answer
+    here - `configs[:limit]` - was the worst one available, because it tested
+    the same prefix every cycle and never looked at the rest at all.
+
+    Two groups instead:
+
+      * everything with a track record, tested every cycle without exception.
+        That is the published list and its near misses, it is small (tens), and
+        re-verifying it is the whole job - a server that stopped working has to
+        leave the list quickly.
+      * plus a rotating window over the unproven remainder, so discovery
+        continues and a source that has produced nothing so far still gets its
+        turn, just not at the cost of the list's freshness.
+
+    A node the window finds joins the first group next cycle, so anything that
+    works is measured continuously from then on.
+    """
+    limit = int(test_cfg.get("max_configs_to_test", 0) or 0)
+    if not limit or len(configs) <= limit:
+        return configs
+
+    rel = Reliability.load(int(test_cfg.get("reliability_window", 6) or 6))
+
+    proven, rest = [], []
+    for c in configs:
+        key = state.block_key(c.address, c.port)
+        if c.manual or (rel.samples(key) > 0 and rel.score(key) > 0):
+            proven.append(c)
+        else:
+            rest.append(c)
+
+    take = max(0, limit - len(proven))
+    if not rest or take <= 0:
+        log.info("testing %d known-good config(s) only; the pool is %d",
+                 len(proven), len(configs))
+        return proven
+
+    cursor = state.read_cursor() % len(rest)
+    window = rest[cursor:cursor + take]
+    if len(window) < take:                     # wrap around the end
+        window += rest[:take - len(window)]
+    state.write_cursor((cursor + len(window)) % len(rest))
+
+    log.info("testing %d of %d: %d with a track record + %d unproven "
+             "(rotating, from #%d of %d)",
+             len(proven) + len(window), len(configs), len(proven),
+             len(window), cursor, len(rest))
+    return proven + window
+
+
 def _log_source_yield(tested: List[ParsedConfig],
                       alive: List[ParsedConfig]) -> None:
     """Report what each source was worth this cycle.
@@ -300,7 +354,8 @@ def _reliability_of(c: ParsedConfig) -> float:
 
 
 def _apply_reliability(cfg: dict, tested: List[ParsedConfig],
-                       alive: List[ParsedConfig]) -> List[ParsedConfig]:
+                       alive: List[ParsedConfig],
+                       pool: List[ParsedConfig]) -> List[ParsedConfig]:
     """Record this cycle's outcome per endpoint and drop the chronic failures.
 
     Every config that went into the test is recorded, not just the survivors —
@@ -332,7 +387,11 @@ def _apply_reliability(cfg: dict, tested: List[ParsedConfig],
         log.info("reliability filter (>=%.0f%% of last %d cycles): dropped %d",
                  min_score * 100, window, dropped)
 
-    rel.prune(state.block_key(c.address, c.port) for c in tested)
+    # Prune against the WHOLE pool, not this cycle's slice. With rotation on,
+    # most endpoints are not tested in any given cycle, and pruning to the
+    # slice would throw away the history of everything that was not - which is
+    # exactly the history the rotation depends on to know what is proven.
+    rel.prune(state.block_key(c.address, c.port) for c in pool)
     try:
         rel.save()
     except Exception:

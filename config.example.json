@@ -83,7 +83,8 @@
     "_geo_comment": "geo_via_tunnel asks Cloudflare's trace endpoint THROUGH each tunnel to learn the real exit IP + country, so CDN-fronted/chained configs get the correct flag (not the misleading address-based country). Turn off only if it slows the cycle too much.",
     "geo_via_tunnel": true,
     "trace_url": "https://www.cloudflare.com/cdn-cgi/trace",
-    "max_configs_to_test": 0,
+    "_rotation_comment": "Cycle time IS the freshness of the published list - these nodes die in minutes, so a list rebuilt every twenty is half wrong by the time the app reads it. When the pool is bigger than max_configs_to_test, a cycle tests everything with a track record (the published list and its near misses - small, and the whole point) plus a ROTATING window over the unproven rest, so a full sweep of the pool still happens at the same rate as before while the list itself is re-verified every cycle. 0 = test everything, which is right only while the pool fits in the interval. Pick it from the measured rate: this box screens about 15 endpoints/second.",
+    "max_configs_to_test": 4500,
     "max_output": 300,
     "min_per_country": 0
   },
