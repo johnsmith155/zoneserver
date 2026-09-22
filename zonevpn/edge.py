@@ -29,6 +29,12 @@ log = logging.getLogger("zonevpn.edge")
 ROOT = Path(__file__).resolve().parent.parent
 
 
+# Cloudflare answers Python's default User-Agent ("Python-urllib/3.x") with a
+# 403 before the worker ever runs — bot protection, not our code. Measured from
+# this box: same URL, 403 with that agent, 200 with this one.
+_UA = "zoneserver/1.0"
+
+
 def _key(cfg: dict, name: str) -> Optional[str]:
     path = cfg.get(f"edge_{name}_key_file") or f".edge-{name}-key"
     p = Path(path) if os.path.isabs(path) else ROOT / path
@@ -64,7 +70,8 @@ def publish_list(cfg: dict, content: str) -> bool:
     req = urllib.request.Request(
         f"{base}/v1/l", data=content.encode("utf-8"), method="PUT",
         headers={"Authorization": f"Bearer {key}",
-                 "Content-Type": "text/plain; charset=utf-8"})
+                 "Content-Type": "text/plain; charset=utf-8",
+                 "User-Agent": _UA})
     try:
         with urllib.request.urlopen(req, timeout=20) as resp:
             return resp.status == 200
@@ -84,7 +91,7 @@ def field_stats(cfg: dict, hours: int = 6, cc: str = "IR") -> Dict[str, dict]:
         return {}
     req = urllib.request.Request(
         f"{base}/v1/s?hours={int(hours)}&cc={cc}",
-        headers={"Authorization": f"Bearer {key}"})
+        headers={"Authorization": f"Bearer {key}", "User-Agent": _UA})
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode("utf-8"))
