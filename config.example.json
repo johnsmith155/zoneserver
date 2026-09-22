@@ -95,7 +95,14 @@
     "exclude_exit_countries": [
       "IR",
       "IL"
-    ]
+    ],
+    "_field_comment": "Field reports = what real phones saw. A published server with at least field_min_attempts reports in the last field_hours and a success rate under field_drop_below is not published; otherwise the field rate is blended into the order (60% field, 40% this box).",
+    "field_hours": 6,
+    "field_min_attempts": 8,
+    "field_drop_below": 0.1
   },
-  "_sources_comment": "Chosen on MEASURED yield, not on how many links a file advertises. Six cycles of `source yield: N alive / M tested` said the same thing twice over: small repos that are rebuilt hourly and test before publishing beat multi-thousand-entry warehouses by two orders of magnitude - Mahdi0024 ran at 20%, ermaozi and MohammadBahemmat at ~9%, while mahdibland returned 0 from 12989 tested endpoints and LalatinaHub/Mineral 0 from 4142, despite Mineral having contributed the most endpoints no other source had. Twelve sources that produced nothing at all were dropped. Keep reading that log before adding or removing anything here; an unchanged source costs a 304, so the cheap part is fetching, not testing."
+  "_sources_comment": "Chosen on MEASURED yield, not on how many links a file advertises. Six cycles of `source yield: N alive / M tested` said the same thing twice over: small repos that are rebuilt hourly and test before publishing beat multi-thousand-entry warehouses by two orders of magnitude - Mahdi0024 ran at 20%, ermaozi and MohammadBahemmat at ~9%, while mahdibland returned 0 from 12989 tested endpoints and LalatinaHub/Mineral 0 from 4142, despite Mineral having contributed the most endpoints no other source had. Twelve sources that produced nothing at all were dropped. Keep reading that log before adding or removing anything here; an unchanged source costs a 304, so the cheap part is fetching, not testing.",
+  "_edge_comment": "edge_url: the Cloudflare worker (edge/). The collector writes the signed list there as a mirror and reads the app's field reports back; its keys are files next to config.json (.edge-publish-key, .edge-read-key), written by edge/deploy.sh. mirror_urls: more places the app may fetch the list from, carried inside the signed payload.",
+  "edge_url": "https://edge.pale-orchid-4238.workers.dev",
+  "mirror_urls": []
 }

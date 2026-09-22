@@ -11,3 +11,9 @@ __pycache__/
 
 # Local runtime state (status snapshot, blocklist, logs) — must survive updates
 state/
+
+# edge worker keys (see edge/deploy.sh)
+.edge-*-key
+
+edge/.wrangler/
+edge/node_modules/

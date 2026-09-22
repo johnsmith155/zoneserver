@@ -1,0 +1,20 @@
+# ZoneVPN edge worker — field reports and the list mirror. See src/index.js.
+# Deploy with ./deploy.sh, which supplies the API token from ~/.cloudflare-token.
+name = "edge"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+workers_dev = true
+account_id = "0b7c6f38c21a6a821f5ab4a8fd736f38"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "zone-reports"
+database_id = "d7ca92ad-8230-437c-876c-ae8bd9669706"
+
+[[kv_namespaces]]
+binding = "LIST"
+id = "b7e5074f5067430c9b1747b69c7be2a8"
+
+# Drops field-report buckets older than three days.
+[triggers]
+crons = ["17 */6 * * *"]

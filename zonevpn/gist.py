@@ -64,12 +64,17 @@ def publish(token: str, gist_id: str, filename: str, payload: dict,
       app must base64-decode -> utf-8 -> JSON.
     - Else the gist stores readable, indented JSON.
     """
+    return update_gist(token, gist_id, filename,
+                       render(payload, base64_encode, sign_key_b64))
+
+
+def render(payload: dict, base64_encode: bool = False,
+           sign_key_b64: Optional[str] = None) -> str:
+    """The exact text the gist stores, so a mirror can serve the same bytes."""
     if sign_key_b64:
         from . import sign as _sign
-        content = _sign.build_signed_content(payload, sign_key_b64)
-    elif base64_encode:
+        return _sign.build_signed_content(payload, sign_key_b64)
+    if base64_encode:
         raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        content = base64.b64encode(raw).decode("ascii")
-    else:
-        content = json.dumps(payload, ensure_ascii=False, indent=2)
-    return update_gist(token, gist_id, filename, content)
+        return base64.b64encode(raw).decode("ascii")
+    return json.dumps(payload, ensure_ascii=False, indent=2)

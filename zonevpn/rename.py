@@ -32,6 +32,12 @@ def _stable_suffix(cfg: ParsedConfig, salt: int = 0, n: int = 5) -> str:
     return "".join(out)
 
 
+def node_suffix(cfg: ParsedConfig) -> str:
+    """The name suffix the app reports this node by (salt 0; a collision
+    inside one list is rare enough that its reports simply do not join)."""
+    return _stable_suffix(cfg)
+
+
 def build_output(configs: List[ParsedConfig], name_prefix: str = "zone-vpn") -> dict:
     """configs must already be in publishing order."""
     used: set[str] = set()

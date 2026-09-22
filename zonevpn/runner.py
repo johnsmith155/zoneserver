@@ -10,11 +10,11 @@ from datetime import datetime, timezone
 from typing import Optional, List
 
 from . import config as cfgmod
-from . import gist, links, sign, sources, state
+from . import edge, gist, links, sign, sources, state
 from .geo import GeoResolver
 from .links import ParsedConfig
 from .reliability import Reliability
-from .rename import build_output
+from .rename import build_output, node_suffix
 from .tester import Tester
 
 log = logging.getLogger("zonevpn.runner")
@@ -293,6 +293,14 @@ async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
         others = _trim(others, keep, int(test_cfg.get("min_per_country", 0) or 0))
         alive = manual_part + others
 
+    # 6b. What phones saw. Reorders, and past a clear threshold removes, what
+    # this box alone would have published. See zonevpn/edge.py.
+    alive = _apply_field_reports(cfg, test_cfg, alive)
+    if not alive:
+        log.warning("nothing left after field reports; not publishing")
+        _progress("idle", active=False)
+        return False
+
     # Final order: proven first, then by real delay.
     #
     # Sorting on latency alone is what put the least reliable servers at the top
@@ -300,7 +308,7 @@ async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
     # nearest ones are the most likely to be locally throttled. A node with a
     # track record and 200 ms beats an unknown at 90 ms.
     alive.sort(key=lambda c: (
-        -_reliability_of(c),
+        -_combined_score(c),
         c.ping if c.ping and c.ping > 0 else 10 ** 9,
     ))
 
@@ -308,12 +316,22 @@ async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
     _progress("publishing", threads=threads, collected=collected,
               reachable=reachable, alive=len(alive))
     payload = build_output(alive, cfg.get("name_prefix", "zone-vpn"))
+    # Where else the app may fetch this list, and where it reports to — inside
+    # the signed payload, so both can move to new addresses without an app
+    # update, and no mirror can point the app anywhere the signer did not.
+    mirrors = [u for u in [edge.list_url(cfg)] + list(cfg.get("mirror_urls") or [])
+               if isinstance(u, str) and u.startswith("https://")]
+    if mirrors:
+        payload["mirrors"] = mirrors
+    if edge.report_url(cfg):
+        payload["report_url"] = edge.report_url(cfg)
     sign_key = sign.load_private_key(cfg)  # None unless configured -> opt-in
-    ok = gist.publish(
-        cfg["github_token"], cfg["gist_id"], cfg["gist_filename"], payload,
-        base64_encode=bool(cfg.get("gist_base64", True)),
-        sign_key_b64=sign_key,
-    )
+    content = gist.render(payload, bool(cfg.get("gist_base64", True)), sign_key)
+    ok = gist.update_gist(
+        cfg["github_token"], cfg["gist_id"], cfg["gist_filename"], content)
+    if edge.list_url(cfg):
+        mirrored = edge.publish_list(cfg, content)
+        log.info("edge mirror %s", "updated" if mirrored else "NOT updated")
     if sign_key:
         log.info("payload signed (Ed25519) before publish")
     if ok:
@@ -506,6 +524,55 @@ def _log_source_yield(tested: List[ParsedConfig],
     for src, n in rows:
         log.info("source yield: %5d alive / %5d tested  %s",
                  won.get(src, 0), n, src)
+
+
+def _apply_field_reports(cfg: dict, test_cfg: dict,
+                         alive: List[ParsedConfig]) -> List[ParsedConfig]:
+    """Fold in what phones reported, and drop what fails on them.
+
+    A node that passes here and keeps failing for real users is exactly the
+    gap between a datacenter and a mobile network, and nothing on this box can
+    see it. With enough reports (`field_min_attempts`) and a success rate
+    below `field_drop_below`, it is not published; manual servers are exempt.
+    Everything else just carries its field rate into the sort.
+    """
+    stats = edge.field_stats(cfg, hours=int(test_cfg.get("field_hours", 6) or 6))
+    if not stats:
+        return alive
+    min_attempts = int(test_cfg.get("field_min_attempts", 8) or 8)
+    drop_below = float(test_cfg.get("field_drop_below", 0.1) or 0.0)
+    kept, dropped, joined = [], [], 0
+    for c in alive:
+        s = stats.get(node_suffix(c))
+        if s:
+            joined += 1
+            rate = edge.field_rate(s)
+            if rate is not None:
+                c.extra["field"] = rate
+            attempts = s["ok"] + s["hs"] + s["vf"]
+            if (not c.manual and attempts >= min_attempts
+                    and s["ok"] / attempts < drop_below):
+                dropped.append((c, s))
+                continue
+        kept.append(c)
+    log.info("field reports: %d of %d published servers have data; "
+             "dropped %d that fail on phones", joined, len(alive), len(dropped))
+    for c, s in dropped:
+        log.info("  field-dropped %s %s:%s  ok=%d hs=%d vf=%d",
+                 c.country or "??", c.address, c.port, s["ok"], s["hs"], s["vf"])
+    return kept
+
+
+def _combined_score(c: ParsedConfig) -> float:
+    """This box's track record, blended with the field's when there is one.
+
+    The field gets the larger share: it is measured where the users are.
+    """
+    rel = _reliability_of(c)
+    field = c.extra.get("field")
+    if field is None:
+        return rel
+    return 0.4 * rel + 0.6 * float(field)
 
 
 def _reliability_of(c: ParsedConfig) -> float:
