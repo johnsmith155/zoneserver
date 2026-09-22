@@ -317,7 +317,8 @@ class Tester:
             pass
 
     # ------------------------------------------------------------------ #
-    async def sift(self, configs: List[ParsedConfig]
+    async def sift(self, configs: List[ParsedConfig],
+                   xray_path: Optional[str] = None,
                    ) -> "tuple[List[ParsedConfig], List[ParsedConfig]]":
         """Split the pool into what this xray build will load, and what it won't.
 
@@ -341,6 +342,10 @@ class Tester:
         number 12, ask again, and repeat - three or four cheap validations per
         chunk instead of a tree of real process starts. Halving is kept only for
         the case where the message does not name a tag.
+        
+        [xray_path] overrides the binary. The runner uses it to sift a second
+        time with the build the *app* ships, so nothing is published that the
+        phone's core would refuse - see `app_core_xray`.
         """
         if not configs:
             return [], []
@@ -348,22 +353,24 @@ class Tester:
         chunks = [configs[i:i + size] for i in range(0, len(configs), size)]
         sem = asyncio.Semaphore(max(1, self.sift_concurrency))
 
+        binary = xray_path or self.xray_path
+
         async def one(chunk):
             async with sem:
-                return await self._sift_chunk(list(chunk))
+                return await self._sift_chunk(list(chunk), binary)
 
         results = await asyncio.gather(*[one(c) for c in chunks])
         good = [c for g, _ in results for c in g]
         bad = [c for _, b in results for c in b]
         return good, bad
 
-    async def _sift_chunk(self, chunk: List[ParsedConfig]
+    async def _sift_chunk(self, chunk: List[ParsedConfig], binary: str
                           ) -> "tuple[List[ParsedConfig], List[ParsedConfig]]":
         bad: List[ParsedConfig] = []
         while chunk:
             path = self._write_batch_config(chunk, self.base_port)
             try:
-                code, err = await self._xray_test(path)
+                code, err = await self._xray_test(path, binary)
             finally:
                 try:
                     os.unlink(path)
@@ -379,16 +386,17 @@ class Tester:
                     return [], bad + chunk
                 mid = len(chunk) // 2
                 left, right = await asyncio.gather(
-                    self._sift_chunk(chunk[:mid]),
-                    self._sift_chunk(chunk[mid:]))
+                    self._sift_chunk(chunk[:mid], binary),
+                    self._sift_chunk(chunk[mid:], binary))
                 return left[0] + right[0], bad + left[1] + right[1]
             bad.append(chunk.pop(int(match.group(1))))
         return chunk, bad
 
-    async def _xray_test(self, path: str) -> "tuple[int, str]":
+    async def _xray_test(self, path: str, binary: Optional[str] = None
+                         ) -> "tuple[int, str]":
         """Validate a config file without starting anything. (code, output)"""
         proc = await asyncio.create_subprocess_exec(
-            self.xray_path, "run", "-test", "-c", path,
+            binary or self.xray_path, "run", "-test", "-c", path,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )

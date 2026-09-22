@@ -327,6 +327,61 @@ def rebuild_link(link: str, new_name: str) -> str:
     return base + "#" + urllib.parse.quote(new_name)
 
 
+def canonical_link(link: str) -> str:
+    """The same node, written in the one form every client reads.
+
+    Only Shadowsocks has more than one shape in the wild, and the app's link
+    parser (flutter_v2ray 1.0.10) reads exactly one of them: SIP002 with a
+    base64 userinfo. Measured on the list published on 2026-09-22, twenty-one
+    of thirty-nine servers were Shadowsocks-2022 written in SIP002's *plain*
+    form (`ss://2022-blake3-...:KEY@host:port`), which that parser base64-
+    decodes, fails on, and turns into `method: none` with no password. Every
+    one of them passed this collector's own test - this parser reads the plain
+    form correctly - and every one was dead on arrival in the app.
+
+    The app now copes with all three shapes (`LinkCompat` in the app repo), but
+    the list should not depend on the newest client: publishing the canonical
+    form makes every build parse it, including one already in someone's pocket.
+    Query parameters are dropped because the tester never applied them, so the
+    link published is the link that was tested.
+    """
+    link = link.strip()
+    if not link.startswith("ss://"):
+        return link
+    cfg = _parse_ss(link)
+    if cfg is None:
+        return link
+    server = cfg.outbound["settings"]["servers"][0]
+    creds = f"{server['method']}:{server['password']}".encode("utf-8")
+    userinfo = base64.urlsafe_b64encode(creds).decode("ascii").rstrip("=")
+    host = server["address"]
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"  # a bare IPv6 address needs its brackets back
+    frag = ""
+    if "#" in link:
+        frag = "#" + link.split("#", 1)[1]
+    return f"ss://{userinfo}@{host}:{server['port']}{frag}"
+
+
+def node_key(link: str) -> str:
+    """One node configuration, whatever it is currently called.
+
+    The share link minus its name - for VMess, whose name lives inside the
+    base64 JSON, the JSON minus `ps`. Used to give a node the same published
+    name every cycle, which is what keeps its id in the app stable.
+    """
+    link = link.strip()
+    if link.startswith("vmess://"):
+        try:
+            info = json.loads(_b64decode_str(link[len("vmess://"):]))
+            info.pop("ps", None)
+            return "vmess://" + json.dumps(info, sort_keys=True,
+                                           separators=(",", ":"))
+        except Exception:
+            return link
+    return canonical_link(link).split("#", 1)[0]
+
+
 def dedup_key(cfg: ParsedConfig) -> str:
     """Identity used to drop duplicate servers before testing."""
     return f"{cfg.protocol}|{cfg.address.lower()}|{cfg.port}"

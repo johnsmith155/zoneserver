@@ -154,22 +154,30 @@ def write_cursor(cursor: int) -> None:
 # --------------------------------------------------------------------------- #
 # configs this xray build refuses to load (see tester.sift)                    #
 # --------------------------------------------------------------------------- #
-def read_rejects(build: str) -> set:
+def _rejects_file(kind: str) -> Path:
+    """One file per validator: the collector's own xray, and the app's."""
+    if kind == "main":
+        return REJECTS_FILE
+    return REJECTS_FILE.with_name(
+        f"{REJECTS_FILE.stem}_{kind}{REJECTS_FILE.suffix}")
+
+
+def read_rejects(build: str, kind: str = "main") -> set:
     """The fingerprints xray rejected, if they were learned on THIS build.
 
     Tied to the binary: a different xray parses a different set, and carrying
     the old list across an upgrade would permanently hide configs the new
     build handles fine.
     """
-    data = _read_json(REJECTS_FILE, {})
+    data = _read_json(_rejects_file(kind), {})
     if not isinstance(data, dict) or data.get("build") != build:
         return set()
     keys = data.get("keys")
     return set(keys) if isinstance(keys, list) else set()
 
 
-def write_rejects(build: str, keys) -> None:
-    _atomic_write(REJECTS_FILE, json.dumps(
+def write_rejects(build: str, keys, kind: str = "main") -> None:
+    _atomic_write(_rejects_file(kind), json.dumps(
         {"build": build, "keys": sorted(keys)}, ensure_ascii=False))
 
 

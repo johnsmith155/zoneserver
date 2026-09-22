@@ -6,7 +6,7 @@ import logging
 import os
 import time
 from datetime import datetime, timezone
-from typing import List
+from typing import Optional, List
 
 from . import config as cfgmod
 from . import gist, links, sign, sources, state
@@ -123,6 +123,17 @@ async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
             log.info("skipping %d config(s) this xray build cannot load",
                      before - len(configs))
 
+    # 1d. ...and what the APP's core cannot load. See `_app_core`.
+    app_core = _app_core(cfg)
+    app_build = f"app:{_xray_build(app_core)}" if app_core else ""
+    app_rejects = state.read_rejects(app_build, kind="app") if app_core else set()
+    if app_rejects:
+        before = len(configs)
+        configs = [c for c in configs if links.fingerprint(c) not in app_rejects]
+        if before != len(configs):
+            log.info("skipping %d config(s) the app's xray cannot load",
+                     before - len(configs))
+
     pool = configs
     configs = _select_for_testing(test_cfg, configs)
 
@@ -168,6 +179,18 @@ async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
             state.write_rejects(build, rejects & live)
         except Exception:
             log.exception("failed to save the xray reject list (non-fatal)")
+    if app_core and configs:
+        configs, app_unloadable = await tester.sift(configs, xray_path=app_core)
+        if app_unloadable:
+            log.info("the app's xray rejects %d more config(s); remembering them",
+                     len(app_unloadable))
+            app_rejects |= {links.fingerprint(c) for c in app_unloadable}
+        if app_rejects:
+            live = {links.fingerprint(c) for c in pool}
+            try:
+                state.write_rejects(app_build, app_rejects & live, kind="app")
+            except Exception:
+                log.exception("failed to save the app-core reject list (non-fatal)")
     if not configs:
         log.warning("nothing left to test after sifting; skipping cycle")
         _progress("idle", active=False)
@@ -297,6 +320,40 @@ async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
     _progress("idle", active=False, published=payload.get("count", len(alive)),
               duration_s=round(time.monotonic() - t0, 1))
     return ok
+
+
+def _app_core(cfg: dict) -> Optional[str]:
+    """The xray build the app ships, if it is installed here.
+
+    ## Why the collector needs a second xray
+
+    The app's core is whatever `flutter_v2ray` bundles - Xray 25.3.6, from
+    March 2025 - while this collector tests with 25.12.8. Nine months of
+    features sit between them: a config written for the newer core (VLESS
+    encryption, the newer XHTTP options) passes every test here, is published
+    as a working server, and is refused by the phone's core before it dials
+    anything. From the user's side that is a server that "does not respond",
+    and the connect flow moves on - one more of the "slow to connect, keeps
+    switching" failures that were never on the network at all.
+
+    So every config is also validated with the app's own build, and one it
+    refuses is never published. Validation only (`run -test`): the tunnel test
+    itself stays on the newer core, which the collector needs for
+    `allowInsecure`.
+
+    Off, with a warning, when the binary is missing - the collector keeps
+    working exactly as before.
+    """
+    path = (cfg.get("test") or {}).get("app_core_xray") or cfg.get("app_core_xray")
+    if not path:
+        return None
+    if not os.path.isabs(path):
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), path)
+    if not os.path.isfile(path):
+        log.warning("app core xray not found at %s; publishing without the "
+                    "app-parity check", path)
+        return None
+    return path
 
 
 def _xray_build(xray_path: str) -> str:
