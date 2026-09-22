@@ -90,7 +90,12 @@
     "max_output": 300,
     "min_per_country": 0,
     "_app_core_comment": "app_core_xray: the xray build the APP ships (flutter_v2ray bundles 25.3.6). Every config is also validated with it and never published if it refuses to load - a config that passes here and cannot start on the phone is a server that 'does not respond'. Validation only; testing stays on xray_path. Missing binary = check skipped with a warning.",
-    "app_core_xray": "bin/xray-app"
+    "app_core_xray": "bin/xray-app",
+    "_exclude_exit_comment": "exclude_exit_countries: exits that are never published. IR because a tunnel that comes out inside the user's own filtered network is useless; IL at the owner's request. The app hides the same set.",
+    "exclude_exit_countries": [
+      "IR",
+      "IL"
+    ]
   },
   "_sources_comment": "Chosen on MEASURED yield, not on how many links a file advertises. Six cycles of `source yield: N alive / M tested` said the same thing twice over: small repos that are rebuilt hourly and test before publishing beat multi-thousand-entry warehouses by two orders of magnitude - Mahdi0024 ran at 20%, ermaozi and MohammadBahemmat at ~9%, while mahdibland returned 0 from 12989 tested endpoints and LalatinaHub/Mineral 0 from 4142, despite Mineral having contributed the most endpoints no other source had. Twelve sources that produced nothing at all were dropped. Keep reading that log before adding or removing anything here; an unchanged source costs a 304, so the cheap part is fetching, not testing."
 }

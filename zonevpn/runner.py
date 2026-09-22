@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import collections
 import logging
 import os
 import time
@@ -264,15 +265,22 @@ async def run_cycle(cfg: dict, xray_path: str, geo: GeoResolver) -> bool:
         for c in need_geo:
             c.country = cc_map.get(c.exit_ip or c.address, "")
 
-    # 5b. Drop servers whose REAL exit is Iran — a tunnel that exits inside the
-    # user's own (restricted) country is useless and misleading, so it never
-    # makes the list.
+    # 5b. Drop servers whose REAL exit is a country we never offer: Iran,
+    # because a tunnel that exits inside the user's own filtered network is not
+    # a way out of it, and Israel, at the owner's request - most users are in
+    # Iran, where an Israeli exit costs their trust and can cost them more. The
+    # app applies the same rule to its cache and to exits it learns itself.
+    excluded = {cc.upper() for cc in test_cfg.get("exclude_exit_countries", ["IR", "IL"])}
     before = len(alive)
-    alive = [c for c in alive if (c.country or "").upper() != "IR"]
+    dropped = collections.Counter(
+        (c.country or "").upper() for c in alive
+        if (c.country or "").upper() in excluded)
+    alive = [c for c in alive if (c.country or "").upper() not in excluded]
     if before != len(alive):
-        log.info("dropped %d server(s) with an Iran exit", before - len(alive))
+        log.info("dropped %d server(s) by exit country: %s",
+                 before - len(alive), dict(dropped))
     if not alive:
-        log.warning("everything exited via Iran; not publishing")
+        log.warning("every server exits in an excluded country; not publishing")
         _progress("idle", active=False)
         return False
 
