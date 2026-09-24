@@ -40,6 +40,7 @@
   "dashboard_token": "",
   "xray_path": "auto",
   "geoip_db": "GeoLite2-Country.mmdb",
+  "geoip_db_url": "https://github.com/Loyalsoldier/geoip/releases/latest/download/Country.mmdb",
   "test": {
     "_tcp_prefilter_comment": "OFF: a raw TCP connect from Iran falsely drops many working CDN/domain-fronted configs (they only work through xray with proper SNI/routing). Skipping it tests everything via xray -> more real servers, at the cost of a slower cycle.",
     "tcp_prefilter": false,

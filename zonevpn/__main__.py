@@ -95,6 +95,10 @@ async def main_loop() -> None:
     while not _stop.is_set():
         start = time.monotonic()
         try:
+            await geo.refresh_if_stale(cfg.get("geoip_db_url"))
+        except Exception:
+            log.exception("GeoIP refresh check failed (continuing)")
+        try:
             await run_cycle(cfg, xray_path, geo)
         except Exception:
             log.exception("cycle failed")
