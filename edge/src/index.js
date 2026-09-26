@@ -24,7 +24,13 @@
  *   GET  /v1/s?hours=6    collector -> aggregates      Bearer READ_KEY
  *   GET  /v1/l            anyone -> signed list
  *   PUT  /v1/l            collector -> signed list     Bearer PUBLISH_KEY
+ *   GET  /privacy         anyone -> the privacy policy page Play links to
  */
+
+// Generated from the app's legal_documents.dart by edge/build_privacy.py, so
+// the page and the in-app policy are the same text. Wrangler imports .html as
+// a string.
+import PRIVACY_HTML from './privacy.html';
 
 const OUTCOMES = {
   ok: 'ok',   // connect verified: real traffic crossed the tunnel
@@ -51,6 +57,10 @@ export default {
       }
       if (url.pathname === '/v1/l' && request.method === 'GET') {
         return await readList(request, env, ctx);
+      }
+      if ((url.pathname === '/privacy' || url.pathname === '/privacy/') &&
+          (request.method === 'GET' || request.method === 'HEAD')) {
+        return privacyPage(request);
       }
       if (url.pathname === '/v1/l' && request.method === 'PUT') {
         if (!(await authorized(request, env.PUBLISH_KEY))) return deny();
@@ -162,6 +172,18 @@ async function writeList(request, env) {
   if (!body || body.length > 2 * 1024 * 1024) return json({ error: 'bad size' }, 400);
   await env.LIST.put('list', body);
   return json({ stored: body.length });
+}
+
+// ── Privacy policy ───────────────────────────────────────────────────────────
+
+function privacyPage(request) {
+  return new Response(request.method === 'HEAD' ? null : PRIVACY_HTML, {
+    headers: {
+      'content-type': 'text/html; charset=utf-8',
+      'cache-control': 'public, max-age=3600',
+      'x-content-type-options': 'nosniff',
+    },
+  });
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
