@@ -85,12 +85,12 @@ toggle_autoupdate() {
 }
 
 dashboard_info() {
-  local ip port token
+  local ip port
   ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
   port="$(cfg_get dashboard_port 8787)"
-  token="$(cfg_get dashboard_token '')"
   say "Dashboard"
-  echo "  http://${ip:-SERVER_IP}:${port}/?token=${token}"
+  echo "  https://${ip:-SERVER_IP}:${port}   (self-signed: accept the warning once)"
+  echo "  change the sign-in: $APP_DIR/venv/bin/python -m zonevpn.dashboard set-login"
   pause
 }
 

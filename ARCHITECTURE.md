@@ -40,10 +40,10 @@ sources.collect()        # دانلود لینک‌ها از URLهای config، 
 | `sign.py` | امضای Ed25519 برای ضد جعل بودن لیست منتشرشده (جزئیات زیر). |
 | `runner.py` | اورکستریشن کل سیکل (`run_cycle`) + منطق trim + فیلتر blocklist + نوشتن state. |
 | `state.py` | state محلی مشترک بین collector و dashboard: `status.json`, `servers.json` (لیست دیکدشده + `block_key`)، `blocklist.json`، `zonevpn.log`. |
-| `dashboard.py` | کنسول وب aiohttp (پورت `dashboard_port`، پیش‌فرض 8787): وضعیت، لاگ زنده، جدول سرورها، دکمهٔ Delete (blocklist + ری‌پابلیش فوری)، دکمهٔ Update. احراز هویت با `dashboard_token`. |
+| `dashboard.py` | کنسول وب aiohttp (پورت `dashboard_port`، پیش‌فرض 8787): وضعیت، لاگ زنده، جدول سرورها، دکمهٔ Delete (blocklist + ری‌پابلیش فوری)، دکمهٔ Update، شروع چرخهٔ تازه، تاریخچهٔ چرخه‌ها، بازده منابع، منابع سیستم. ورود با نام کاربری/رمز (هش scrypt، کوکی جلسه)، روی HTTPS با گواهی self-signed؛ قبل از ورود فقط صفحهٔ «Sign in» و 404. |
 
 ## داشبورد و آپدیت سرور
-- **داشبورد**: سرویس systemd جدا `zonevpn-dashboard`. باز کردن `http://SERVER_IP:8787/?token=...`.
+- **داشبورد**: سرویس systemd جدا `zonevpn-dashboard`. باز کردن `https://SERVER_IP:8787` و ورود؛ تعیین رمز: `venv/bin/python -m zonevpn.dashboard set-login`.
   - لاگ زنده از `state/zonevpn.log` (هندلر RotatingFile در `__main__.py`).
   - جدول سرورها از `state/servers.json` (که هر سیکل نوشته می‌شود) — حتی با gist بیس‌۶۴ هم خوانا نمایش داده می‌شود.
   - **Delete**: `block_key` (یعنی `address:port`، پایدار بین سیکل‌ها) را به `state/blocklist.json` اضافه می‌کند و فوراً gist را بدون آن سرور دوباره منتشر می‌کند. runner هر سیکل blocklist را فیلتر می‌کند.

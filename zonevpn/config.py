@@ -63,7 +63,8 @@ def load_lenient() -> Tuple[dict, Optional[str]]:
 
 def _extract_dashboard_keys() -> dict:
     out = {"dashboard_host": "0.0.0.0", "dashboard_port": 8787,
-           "dashboard_token": "", "test": {}}
+           "dashboard_tls": True, "dashboard_user": "", "dashboard_pass_hash": "",
+           "test": {}}
     try:
         raw = CONFIG_PATH.read_text(encoding="utf-8")
     except OSError:
@@ -74,9 +75,13 @@ def _extract_dashboard_keys() -> dict:
     m = re.search(r'"dashboard_port"\s*:\s*(\d+)', raw)
     if m:
         out["dashboard_port"] = int(m.group(1))
-    m = re.search(r'"dashboard_token"\s*:\s*"([^"]*)"', raw)
-    if m:
-        out["dashboard_token"] = m.group(1)
+    # A broken config must still let the operator sign in and see why.
+    for key in ("dashboard_user", "dashboard_pass_hash"):
+        m = re.search(r'"%s"\s*:\s*"([^"]*)"' % key, raw)
+        if m:
+            out[key] = m.group(1)
+    if re.search(r'"dashboard_tls"\s*:\s*false', raw):
+        out["dashboard_tls"] = False
     return out
 
 

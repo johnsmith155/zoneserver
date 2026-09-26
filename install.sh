@@ -86,21 +86,24 @@ else
 fi
 
 # --------------------------------------------------------------------------- #
-# Make sure the dashboard has a token (generate one if missing) and ensure the
-# dashboard_* keys exist in config.json regardless of how it was created.
+# Make sure the dashboard_* keys exist in config.json regardless of how it was
+# created. Sign-in is a username and password set with `set-login`; the old
+# URL token is removed — it was written into the access log with every request.
 say "Configuring the dashboard ..."
-DASH_TOKEN="$("$APP_DIR/venv/bin/python" - "$APP_DIR/config.json" <<'PY'
-import json, secrets, sys
+DASH_LOGIN="$("$APP_DIR/venv/bin/python" - "$APP_DIR/config.json" <<'PY'
+import json, sys
 p = sys.argv[1]
 try:
     with open(p, encoding="utf-8") as fh: cfg = json.load(fh)
 except Exception: cfg = {}
 cfg.setdefault("dashboard_host", "0.0.0.0")
 cfg.setdefault("dashboard_port", 8787)
-if not cfg.get("dashboard_token"):
-    cfg["dashboard_token"] = secrets.token_urlsafe(18)
+cfg.setdefault("dashboard_tls", True)
+cfg.setdefault("dashboard_user", "")
+cfg.setdefault("dashboard_pass_hash", "")
+cfg.pop("dashboard_token", None)
 with open(p, "w", encoding="utf-8") as fh: json.dump(cfg, fh, indent=2, ensure_ascii=False)
-print(cfg["dashboard_token"])
+print("set" if cfg.get("dashboard_pass_hash") else "missing")
 PY
 )"
 chown "$RUN_USER":"$RUN_USER" "$APP_DIR/config.json"
@@ -223,6 +226,11 @@ echo "  Auto-update      :  enabled (hourly) — systemctl list-timers zonevpn-a
 echo "  Edit config      :  zonevpn  ->  6   (or: ${APP_DIR}/venv/bin/python setup_wizard.py)"
 echo ""
 echo "  ┌─ Dashboard ────────────────────────────────────────────────"
-echo "  │  http://${IP:-SERVER_IP}:${DASH_PORT}/?token=${DASH_TOKEN}"
-echo "  │  (token is saved in config.json as dashboard_token)"
+echo "  │  https://${IP:-SERVER_IP}:${DASH_PORT}   (self-signed: accept the warning once)"
+if [ "$DASH_LOGIN" = "set" ]; then
+echo "  │  sign in with the username and password you set"
+else
+echo "  │  no sign-in yet — set one with:"
+echo "  │    ${APP_DIR}/venv/bin/python -m zonevpn.dashboard set-login"
+fi
 echo "  └────────────────────────────────────────────────────────────"
