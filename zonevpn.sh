@@ -89,7 +89,7 @@ dashboard_info() {
   ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
   port="$(cfg_get dashboard_port 8787)"
   say "Dashboard"
-  echo "  https://${ip:-SERVER_IP}:${port}   (self-signed: accept the warning once)"
+  echo "  https://${ip:-SERVER_IP}:${port}"
   echo "  change the sign-in: $APP_DIR/venv/bin/python -m zonevpn.dashboard set-login"
   pause
 }

@@ -29,7 +29,17 @@ sudo bash install.sh
 https://SERVER_IP:8787
 ```
 
-گواهی آن self-signed است؛ مرورگر یک بار هشدار می‌دهد و باید «ادامه» را بزنی.
+گواهی HTTPS از Let's Encrypt برای خود IP سرور است (پروفایل shortlived، ۶ روزه) و
+مرورگر هشداری نمی‌دهد. certbot از snap نصب است و تایمر `snap.certbot.renew.timer`
+روزی دو بار تمدیدش می‌کند؛ داشبورد گواهی تازه را ظرف ۱۰ دقیقه بدون ری‌استارت
+برمی‌دارد. مسیرها در `config.json`: `dashboard_cert` و `dashboard_key`. اگر خالی
+باشند، داشبورد یک گواهی self-signed برای «localhost» می‌سازد (مرورگر هشدار می‌دهد).
+گرفتن دوباره روی سرور تازه (پورت 80 باید آزاد و از بیرون در دسترس باشد):
+
+```bash
+snap install --classic certbot
+certbot certonly --standalone --ip-address SERVER_IP --preferred-profile shortlived   --non-interactive --agree-tos --register-unsafely-without-email
+```
 ورود با نام کاربری و رمز است. برای تعیین یا عوض کردنشان روی سرور:
 
 ```bash

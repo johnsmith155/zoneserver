@@ -226,7 +226,7 @@ echo "  Auto-update      :  enabled (hourly) — systemctl list-timers zonevpn-a
 echo "  Edit config      :  zonevpn  ->  6   (or: ${APP_DIR}/venv/bin/python setup_wizard.py)"
 echo ""
 echo "  ┌─ Dashboard ────────────────────────────────────────────────"
-echo "  │  https://${IP:-SERVER_IP}:${DASH_PORT}   (self-signed: accept the warning once)"
+echo "  │  https://${IP:-SERVER_IP}:${DASH_PORT}   (a warning until a trusted certificate is set: see SERVER_UPDATE.md)"
 if [ "$DASH_LOGIN" = "set" ]; then
 echo "  │  sign in with the username and password you set"
 else
