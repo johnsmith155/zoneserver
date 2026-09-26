@@ -571,49 +571,105 @@ def build_app(config_error: str | None = None) -> web.Application:
 TLS_DIR = state.STATE_DIR / "tls"
 
 
-def _tls_context() -> ssl.SSLContext | None:
+def _self_signed() -> tuple[Path, Path]:
     """A self-signed certificate for "localhost", made once and kept.
 
     Deliberately generic: a certificate is the first thing a TLS scanner
     records, and a name on it would say what this box is.
     """
     cert, key = TLS_DIR / "cert.pem", TLS_DIR / "key.pem"
-    try:
-        if not (cert.exists() and key.exists()):
-            from cryptography import x509
-            from cryptography.hazmat.primitives import hashes, serialization
-            from cryptography.hazmat.primitives.asymmetric import ec
-            from cryptography.x509.oid import NameOID
+    if not (cert.exists() and key.exists()):
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.x509.oid import NameOID
 
-            TLS_DIR.mkdir(parents=True, exist_ok=True)
-            private = ec.generate_private_key(ec.SECP256R1())
-            name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")])
-            now = datetime.now(timezone.utc)
-            certificate = (
-                x509.CertificateBuilder()
-                .subject_name(name).issuer_name(name)
-                .public_key(private.public_key())
-                .serial_number(x509.random_serial_number())
-                .not_valid_before(now - timedelta(days=1))
-                .not_valid_after(now + timedelta(days=3650))
-                .add_extension(x509.SubjectAlternativeName(
-                    [x509.DNSName("localhost")]), critical=False)
-                .sign(private, hashes.SHA256()))
-            old = os.umask(0o077)
-            try:
-                key.write_bytes(private.private_bytes(
-                    serialization.Encoding.PEM,
-                    serialization.PrivateFormat.PKCS8,
-                    serialization.NoEncryption()))
-                cert.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
-            finally:
-                os.umask(old)
+        TLS_DIR.mkdir(parents=True, exist_ok=True)
+        private = ec.generate_private_key(ec.SECP256R1())
+        name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")])
+        now = datetime.now(timezone.utc)
+        certificate = (
+            x509.CertificateBuilder()
+            .subject_name(name).issuer_name(name)
+            .public_key(private.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(days=1))
+            .not_valid_after(now + timedelta(days=3650))
+            .add_extension(x509.SubjectAlternativeName(
+                [x509.DNSName("localhost")]), critical=False)
+            .sign(private, hashes.SHA256()))
+        old = os.umask(0o077)
+        try:
+            key.write_bytes(private.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption()))
+            cert.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+        finally:
+            os.umask(old)
+    return cert, key
+
+
+def _certificate_paths(cfg: dict) -> tuple[Path, Path]:
+    """The certificate to serve: a real one when config names it, else ours.
+
+    A real one is Let's Encrypt's certificate for this box's IP address
+    (`dashboard_cert` / `dashboard_key`, certbot's fullchain and privkey),
+    which browsers trust without a warning. It lives six days and certbot
+    renews it on a timer; [_reload_certificate] picks the new one up.
+    """
+    cert = Path(str(cfg.get("dashboard_cert") or ""))
+    key = Path(str(cfg.get("dashboard_key") or ""))
+    if str(cert) not in ("", ".") and cert.is_file() and key.is_file():
+        return cert, key
+    return _self_signed()
+
+
+def _tls_context(cfg: dict) -> tuple[ssl.SSLContext | None, tuple[Path, Path] | None]:
+    try:
+        cert, key = _certificate_paths(cfg)
         context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
         context.load_cert_chain(str(cert), str(key))
-        return context
+        log.info("certificate: %s", cert)
+        return context, (cert, key)
     except Exception as exc:  # the console must still come up
         log.error("HTTPS unavailable (%s); serving plain HTTP", exc)
-        return None
+        return None, None
+
+
+def _stamp(path: Path) -> float:
+    try:
+        return path.stat().st_mtime  # follows certbot's live/ symlinks
+    except OSError:
+        return 0.0
+
+
+async def _reload_certificate(app: web.Application) -> None:
+    """Loads a renewed certificate into the running server.
+
+    A short-lived certificate is replaced every few days. Loading it into the
+    same SSL context means new connections get it at once, and nobody is
+    signed out by a restart.
+    """
+    context, files = app.get("ssl_context"), app.get("cert_files")
+    if context is None or files is None:
+        return
+    cert, key = files
+    seen = _stamp(cert)
+    while True:
+        await asyncio.sleep(600)
+        stamp = _stamp(cert)
+        if stamp and stamp != seen:
+            try:
+                context.load_cert_chain(str(cert), str(key))
+                seen = stamp
+                log.info("certificate reloaded")
+            except Exception as exc:
+                log.error("certificate reload failed: %s", exc)
+
+
+async def _start_reloader(app: web.Application) -> None:
+    app["cert_reloader"] = asyncio.create_task(_reload_certificate(app))
 
 
 # --------------------------------------------------------------------------- #
@@ -671,10 +727,12 @@ def main() -> None:
     if not (cfg.get("dashboard_user") and cfg.get("dashboard_pass_hash")):
         log.warning("no sign-in is set, so nobody can sign in. Run: "
                     "./venv/bin/python -m zonevpn.dashboard set-login")
-    context = _tls_context() if cfg.get("dashboard_tls", True) else None
+    context, files = _tls_context(cfg) if cfg.get("dashboard_tls", True) else (None, None)
     log.info("console on %s://%s:%d", "https" if context else "http", host, port)
-    web.run_app(build_app(cfg_err), host=host, port=port, ssl_context=context,
-                print=None)
+    app = build_app(cfg_err)
+    app["ssl_context"], app["cert_files"] = context, files
+    app.on_startup.append(_start_reloader)
+    web.run_app(app, host=host, port=port, ssl_context=context, print=None)
 
 
 _LOGIN_HTML = r"""<!doctype html>
