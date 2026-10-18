@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import time
 from typing import Optional
 
 import requests
@@ -38,12 +39,27 @@ def create_gist(token: str, filename: str, content: str, description: str) -> Op
 
 def update_gist(token: str, gist_id: str, filename: str, content: str) -> bool:
     payload = {"files": {filename: {"content": content}}}
-    resp = requests.patch(
-        f"{_API}/gists/{gist_id}", headers=_headers(token), json=payload, timeout=30
-    )
-    if resp.status_code == 200:
-        return True
-    log.error("update gist failed: %s %s", resp.status_code, resp.text[:200])
+    # Replacing one file with identical content is safe to retry after a lost
+    # response. Keep the retry bounded so publication fits the five-minute
+    # cycle, and return False on failure so the mirror still gets its chance.
+    for attempt in range(2):
+        try:
+            resp = requests.patch(
+                f"{_API}/gists/{gist_id}", headers=_headers(token),
+                json=payload, timeout=(5, 15),
+            )
+            if resp.status_code == 200:
+                return True
+            log.warning("update gist attempt %d failed: HTTP %s",
+                        attempt + 1, resp.status_code)
+            if resp.status_code not in (500, 502, 503, 504):
+                return False  # auth/rate limits wait for the next cycle
+        except requests.RequestException as exc:
+            log.warning("update gist attempt %d failed: %s",
+                        attempt + 1, type(exc).__name__)
+        if attempt == 0:
+            time.sleep(1)
+    log.error("update gist failed after two attempts")
     return False
 
 

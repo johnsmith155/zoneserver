@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import statistics
 import tempfile
 import time
 from typing import Callable, List, Optional
@@ -62,11 +63,13 @@ class Tester:
         # pings -> the *actually fastest* servers get published. Lower = more
         # accurate but slower; this is the knob behind "test 6 at a time".
         self.measure_concurrency: int = int(cfg.get("measure_concurrency", 32))
-        # Probe each surviving config a few times over a kept-alive connection
-        # and keep the MIN (the warm round-trip), so a one-off TLS-handshake
-        # spike doesn't misrank a good server. Dead configs fail on probe #1 and
-        # never pay for extra samples.
+        # Probe survivors over a kept-alive connection after a separate warm-up.
+        # Median reflects typical latency instead of a single lucky response;
+        # keep the legacy minimum available for existing configurations.
         self.ping_samples: int = max(1, int(cfg.get("ping_samples", 2)))
+        self.ping_statistic: str = cfg.get("ping_statistic", "min")
+        if self.ping_statistic not in ("min", "median"):
+            raise ValueError("ping_statistic must be 'min' or 'median'")
 
         # --- The screening pass ---------------------------------------------
         #
@@ -608,7 +611,7 @@ class Tester:
         try:
             connector = ProxyConnector.from_url(f"socks5://127.0.0.1:{port}")
             timeout = aiohttp.ClientTimeout(total=self.probe_timeout)
-            best: Optional[int] = None
+            samples: List[int] = []
             ok = True
             async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
                 # Warm-up, deliberately not measured. This is a fresh xray and a
@@ -634,10 +637,13 @@ class Tester:
                                 ok = False  # wrong response -> not usable
                                 break
                         ping = int((time.monotonic() - start) * 1000)
-                        if best is None or ping < best:
-                            best = ping
+                        samples.append(ping)
 
-                usable = ok and best is not None and 0 < best <= self.max_ping
+                measured = None
+                if samples:
+                    measured = (int(statistics.median(samples))
+                                if self.ping_statistic == "median" else min(samples))
+                usable = ok and measured is not None and 0 < measured <= self.max_ping
 
                 # Order matters: the cheap latency probe has already ruled
                 # out most configs, so only the survivors pay for the rest.
@@ -649,7 +655,7 @@ class Tester:
                         # config lands here then the check itself is what
                         # is broken, and the runner falls back to this list
                         # instead of publishing nothing.
-                        cfg.ping = best
+                        cfg.ping = measured
                         self.filtered_out.append(cfg)
                         usable = False
 
@@ -659,7 +665,7 @@ class Tester:
                     usable = kbps >= self.min_kbps
 
                 if usable:
-                    cfg.ping = best
+                    cfg.ping = measured
                     # Reuse the same tunnel for the real exit IP/country.
                     if self.geo_via_tunnel:
                         await self._annotate_exit(session, cfg)
@@ -712,13 +718,21 @@ class Tester:
             start = time.monotonic()
             read = 0
             async with session.get(self.throughput_url, allow_redirects=True,
-                                   timeout=timeout) as resp:
+                                   timeout=timeout,
+                                   headers={"Accept-Encoding": "identity"},
+                                   auto_decompress=False) as resp:
+                if resp.status not in (200, 206):
+                    return 0.0
                 async for chunk in resp.content.iter_chunked(16384):
                     read += len(chunk)
                     if read >= self.throughput_bytes:
                         break
+            # A short error page or truncated body can arrive quickly without
+            # proving that this tunnel can carry the requested download.
+            if read < self.throughput_bytes:
+                return 0.0
             elapsed = max(1e-3, time.monotonic() - start)
-            return (read / 1024.0) / elapsed
+            return (self.throughput_bytes / 1024.0) / elapsed
         except Exception:
             return 0.0
 

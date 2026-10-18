@@ -598,9 +598,11 @@ def _apply_reliability(cfg: dict, tested: List[ParsedConfig],
 
     rel = Reliability.load(window)
     passed = {state.block_key(c.address, c.port) for c in alive}
-    for c in tested:
-        rel.record(state.block_key(c.address, c.port),
-                   state.block_key(c.address, c.port) in passed)
+    # Several credentials/transports can share an endpoint. They are one
+    # observation of this cycle, not multiple cycles of reliability history.
+    tested_keys = {state.block_key(c.address, c.port) for c in tested}
+    for key in tested_keys:
+        rel.record(key, key in passed)
 
     kept: List[ParsedConfig] = []
     dropped = 0
