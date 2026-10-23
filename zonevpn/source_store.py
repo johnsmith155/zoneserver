@@ -13,7 +13,7 @@ from . import state
 MAX_CUSTOM = 64
 MAX_SOURCES = 128
 MAX_URL = 2048
-MAX_STORE_BYTES = 256 * 1024
+MAX_STORE_BYTES = 512 * 1024
 
 
 def public_ip(host: str) -> bool:
@@ -57,32 +57,56 @@ def source_id(url: str) -> str:
     return hashlib.sha256(url.encode()).hexdigest()[:24]
 
 
-def read_custom() -> list[str]:
+def read_store() -> tuple[list[str], list[str]]:
     path = state.STATE_DIR / "sources.json"
     try:
         with path.open("rb") as f:
             raw = f.read(MAX_STORE_BYTES + 1)
     except FileNotFoundError:
-        return []
+        return [], []
     if len(raw) > MAX_STORE_BYTES:
         raise ValueError("Saved sources file is too large; restore it before editing.")
     try:
-        items = json.loads(raw)
-        if not isinstance(items, list) or len(items) > MAX_CUSTOM:
+        saved = json.loads(raw)
+        # Accept the original custom-only list without rewriting it on reads.
+        if isinstance(saved, list):
+            items, excluded = saved, []
+        elif isinstance(saved, dict) and saved.get("version") == 2:
+            items, excluded = saved["custom"], saved["excluded"]
+        else:
             raise ValueError()
-        return list(dict.fromkeys(normalize_url(u) for u in items))
-    except (ValueError, TypeError):
+        if (not isinstance(items, list) or len(items) > MAX_CUSTOM
+                or not isinstance(excluded, list) or len(excluded) > MAX_SOURCES):
+            raise ValueError()
+        return (list(dict.fromkeys(normalize_url(u) for u in items)),
+                list(dict.fromkeys(normalize_url(u) for u in excluded)))
+    except (ValueError, TypeError, KeyError):
         raise ValueError("Saved sources file is invalid; restore it before editing.") from None
 
 
+def read_custom() -> list[str]:
+    return read_store()[0]
+
+
 def write_custom(items: list[str]) -> None:
+    write_store(items, read_store()[1])
+
+
+def write_store(items: list[str], excluded: list[str]) -> None:
     # Only dashboard handlers write this file. Their read/modify/write section
     # contains no await, so requests cannot interleave. Readers see old or new.
+    if len(items) > MAX_CUSTOM or len(excluded) > MAX_SOURCES:
+        raise ValueError("Source limit reached.")
+    saved = {"version": 2, "custom": [normalize_url(u) for u in items],
+             "excluded": [normalize_url(u) for u in excluded]}
+    encoded = json.dumps(saved, ensure_ascii=True)
+    if len(encoded.encode("utf-8")) > MAX_STORE_BYTES:
+        raise ValueError("Saved sources file would be too large.")
     state.ensure_dir()
     fd, name = tempfile.mkstemp(prefix=".sources-", dir=state.STATE_DIR)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(items, f, ensure_ascii=True)
+            f.write(encoded)
             f.flush()
             os.fsync(f.fileno())
         os.replace(name, state.STATE_DIR / "sources.json")
@@ -105,5 +129,6 @@ def configured_urls(configured) -> list[str]:
     return result
 
 
-def effective(configured, custom: list[str]) -> list[str]:
-    return list(dict.fromkeys(configured_urls(configured) + custom))[:MAX_SOURCES]
+def effective(configured, custom: list[str], excluded: list[str] = ()) -> list[str]:
+    enabled = [u for u in configured_urls(configured) if u not in excluded]
+    return list(dict.fromkeys(enabled + custom))[:MAX_SOURCES]

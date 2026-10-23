@@ -162,11 +162,11 @@ async def _fetch_one(session, url: str, health=None) -> list[str]:
 
 async def collect(sources: list[str]) -> list[ParsedConfig]:
     try:
-        custom = source_store.read_custom()
+        custom, excluded = source_store.read_store()
     except (OSError, ValueError) as exc:
         log.error("Cannot read custom sources (%s); using configured sources", type(exc).__name__)
-        custom = []
-    urls = source_store.effective(sources, custom)
+        custom, excluded = [], []
+    urls = source_store.effective(sources, custom, excluded)
     for url in list(_CACHE):
         if url not in urls or time.monotonic() - _CACHE[url][2] > CACHE_TTL:
             _CACHE.pop(url, None)

@@ -438,7 +438,7 @@ def _source_payload():
     if error:
         raise ValueError("Fix config.json before managing sources.")
     configured = source_store.configured_urls(cfg.get("sources", []))
-    custom = source_store.read_custom()
+    custom, excluded = source_store.read_store()
     health = state._read_json(state.STATE_DIR / "source_health.json", {})
     if not isinstance(health, dict):
         health = {}
@@ -447,7 +447,7 @@ def _source_payload():
         "sources": [{"id": source_store.source_id(u), "url": u,
                      "custom": u in custom and u not in configured,
                      "health": health.get(source_store.source_id(u), {})}
-                    for u in source_store.effective(configured, custom)],
+                    for u in source_store.effective(configured, custom, excluded)],
     }
 
 
@@ -475,23 +475,41 @@ async def api_source_change(request: web.Request) -> web.Response:
         # No await in this read/modify/write section: concurrent dashboard
         # requests cannot lose each other's changes.
         payload = _source_payload()
-        custom = source_store.read_custom()
-        if request.path.endswith("/remove"):
+        custom, excluded = source_store.read_store()
+        cfg, _ = cfgmod.load_lenient()
+        configured = source_store.configured_urls(cfg.get("sources", []))
+        excluded = [u for u in excluded if u in configured]
+        if request.path.endswith(("/remove", "/edit")):
             sid = body.get("id")
-            removable = {s["id"] for s in payload["sources"] if s["custom"]}
-            if sid not in removable:
-                raise ValueError("Source is missing or managed in config.json.")
-            custom = [u for u in custom if source_store.source_id(u) != sid]
-            source_store.write_custom(custom)
-            message = "Removed. Takes effect next cycle."
+            old = next((s["url"] for s in payload["sources"] if s["id"] == sid), None)
+            if old is None:
+                raise ValueError("Source no longer exists. Refresh the list.")
+            editing = request.path.endswith("/edit")
+            url = source_store.normalize_url(body.get("url")) if editing else None
+            if editing and url != old and any(s["url"] == url for s in payload["sources"]):
+                raise ValueError("This URL already belongs to another source.")
+            if url != old:
+                position = custom.index(old) if old in custom else len(custom)
+                custom = [u for u in custom if u != old]
+                if old in configured and old not in excluded:
+                    excluded.append(old)
+                if editing:
+                    excluded = [u for u in excluded if u != url]
+                    if url not in configured:
+                        custom.insert(position, url)
+                source_store.write_store(custom, excluded)
+            message = "Updated. Takes effect next cycle." if editing else "Removed. Takes effect next cycle."
         else:
             url = source_store.normalize_url(body.get("url"))
             if any(s["url"] == url for s in payload["sources"]):
                 message = "This source already exists."
             else:
-                if len(custom) >= source_store.MAX_CUSTOM or len(payload["sources"]) >= source_store.MAX_SOURCES:
-                    raise ValueError("Source limit reached. Remove an unused custom source first.")
-                source_store.write_custom(custom + [url])
+                if len(payload["sources"]) >= source_store.MAX_SOURCES:
+                    raise ValueError("Source limit reached. Remove an unused source first.")
+                excluded = [u for u in excluded if u != url]
+                if url not in configured:
+                    custom.append(url)
+                source_store.write_store(custom, excluded)
                 message = "Saved. Download and server testing start next cycle."
         return web.json_response({**_source_payload(), "message": message})
     except (ValueError, TypeError) as exc:
@@ -627,6 +645,7 @@ def build_app(config_error: str | None = None) -> web.Application:
         web.get("/api/sources", api_sources),
         web.post("/api/sources", api_source_change),
         web.post("/api/sources/remove", api_source_change),
+        web.post("/api/sources/edit", api_source_change),
         web.get("/api/logs", api_logs),
         web.get("/api/logs/download", api_logs_download),
         web.post("/api/restart", api_restart),
@@ -886,6 +905,7 @@ a{color:inherit;text-decoration:none}
   border-radius:10px;font:600 13px/1.2 inherit;cursor:pointer;display:inline-flex;align-items:center;gap:7px;
   transition:border-color .15s,background .15s}
 .btn:hover{border-color:#36415c;background:var(--card2)}
+.btn[hidden]{display:none}
 .btn:active{transform:translateY(1px)}
 .btn.primary{background:linear-gradient(135deg,var(--acc),var(--acc2));border-color:transparent;color:#fff}
 .btn.danger{color:var(--bad);border-color:#3b2330}.btn.danger:hover{background:#1d1318}
@@ -1071,6 +1091,7 @@ tbody tr:hover td{background:#131826}
     <form id="sourceForm" style="display:flex;gap:8px;flex-wrap:wrap">
      <input class="input grow mono" id="sourceUrl" type="url" maxlength="2048" required aria-label="Source URL" placeholder="https://example.com/subscription.txt"/>
      <button class="btn primary" id="bSourceAdd" type="submit">Add source</button>
+     <button class="btn" id="bSourceCancel" type="button" hidden>Cancel edit</button>
     </form>
     <p class="muted">Public HTTP(S) subscription links: plain text or base64 containing vmess, vless, trojan or ss links. Changes apply next cycle; servers must pass the existing quality checks before publication.</p>
     <p id="sourceMessage" role="status" aria-live="polite"></p>
@@ -1397,8 +1418,14 @@ function renderSources(){
     : '<tr><td colspan="4" class="empty">No source yields in the log yet.</td></tr>';
 }
 
+let sourceEditId = null, sourceItems = [];
+function cancelSourceEdit(){
+  sourceEditId = null; $('sourceUrl').value = '';
+  $('bSourceAdd').textContent = 'Add source'; $('bSourceCancel').hidden = true;
+}
 function renderSourceLinks(d){
   const items = d.sources || [];
+  sourceItems = items;
   $('sourceCount').textContent = items.length + ' sources · ' + items.filter(s => s.custom).length + '/' + d.limit + ' custom';
   $('sourceRows').innerHTML = items.length ? items.map(s => {
     const h = s.health || {}, status = h.status || 'pending';
@@ -1406,7 +1433,7 @@ function renderSourceLinks(d){
     return `<tr><td class="mono" style="max-width:440px;overflow:hidden;text-overflow:ellipsis" title="${esc(s.url)}">${esc(s.url)}</td>` +
       `<td class="${cls}" title="${esc(h.message || 'Awaiting next cycle')}">${esc(status)}<div class="muted" style="white-space:normal;max-width:280px">${esc(h.message || 'Awaiting next cycle')}</div></td>` +
       `<td>${num(h.links)}</td><td>${h.checked_at ? esc(new Date(h.checked_at * 1000).toLocaleTimeString()) : '–'}</td>` +
-      `<td>${s.custom ? `<button class="btn sm" data-source-remove="${esc(s.id)}">Remove</button>` : '<span class="muted">Configured</span>'}</td></tr>`;
+      `<td><button class="btn sm" data-source-edit="${esc(s.id)}">Edit</button> <button class="btn sm" data-source-remove="${esc(s.id)}">Remove</button></td></tr>`;
   }).join('') : '<tr><td colspan="5" class="empty">No source links yet.</td></tr>';
 }
 async function refreshSourceLinks(){
@@ -1478,13 +1505,24 @@ $('sourceForm').onsubmit = async e => {
   button.disabled = true;
   $('sourceMessage').textContent = 'Saving…';
   try {
-    const d = await post('/api/sources', {url: $('sourceUrl').value.trim()});
+    const d = await post(sourceEditId ? '/api/sources/edit' : '/api/sources', {id: sourceEditId, url: $('sourceUrl').value.trim()});
     $('sourceMessage').textContent = d.message || 'Could not save source.';
-    if (d.ok){ $('sourceUrl').value = ''; renderSourceLinks(d); }
+    if (d.ok){ cancelSourceEdit(); renderSourceLinks(d); }
   } catch (_) { $('sourceMessage').textContent = 'Connection lost. Refresh sources before retrying.'; }
   finally { button.disabled = false; }
 };
+$('bSourceCancel').onclick = cancelSourceEdit;
 $('sourceRows').onclick = async e => {
+  const edit = e.target.closest('[data-source-edit]');
+  if ($('bSourceAdd').disabled) return;
+  if (edit){
+    const item = sourceItems.find(s => s.id === edit.dataset.sourceEdit);
+    if (!item) return;
+    sourceEditId = item.id; $('sourceUrl').value = item.url;
+    $('bSourceAdd').textContent = 'Save changes'; $('bSourceCancel').hidden = false;
+    $('sourceMessage').textContent = 'Editing source. Changes apply next cycle.';
+    $('sourceUrl').focus(); return;
+  }
   const button = e.target.closest('[data-source-remove]');
   if (!button || button.disabled) return;
   if (!await ask('Remove this source?', 'The collector will stop using this source from the next cycle.', 'Remove', true)) return;
@@ -1492,7 +1530,7 @@ $('sourceRows').onclick = async e => {
   try {
     const d = await post('/api/sources/remove', {id: button.dataset.sourceRemove});
     $('sourceMessage').textContent = d.message || 'Could not remove source.';
-    if (d.ok) renderSourceLinks(d);
+    if (d.ok){ if (sourceEditId === button.dataset.sourceRemove) cancelSourceEdit(); renderSourceLinks(d); }
   } catch (_) { $('sourceMessage').textContent = 'Connection lost. Refresh sources before retrying.'; }
   finally { button.disabled = false; }
 };

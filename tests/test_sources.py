@@ -184,6 +184,14 @@ class SourceTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(sources, 'PublicResolver', LocalResolver):
             self.assertEqual(len(await sources.collect([self.base + 'good'])), 1)
 
+    async def test_removed_configured_source_not_fetched_or_cached_next_cycle(self):
+        url = self.base + 'good'
+        with patch.object(sources, 'PublicResolver', LocalResolver):
+            self.assertEqual(len(await sources.collect([url])), 1)
+            source_store.write_store([], [url])
+            self.assertEqual(await sources.collect([url]), [])
+            self.assertFalse(sources._CACHE)
+
     async def test_global_deadline_retains_completed_source(self):
         with patch.object(sources, 'PublicResolver', LocalResolver), patch.object(sources, 'CYCLE_TIMEOUT', .05):
             result = await sources.collect([self.base + 'good', self.base + 'slow'])
@@ -225,7 +233,7 @@ class DashboardSourcesTests(unittest.IsolatedAsyncioTestCase):
             response = await getattr(self.client, method)('/api/sources')
             self.assertEqual(response.status, 404)
 
-    async def test_add_duplicate_list_remove_and_builtin_readonly(self):
+    async def test_add_duplicate_list_and_remove_all_source_types(self):
         for url in ['https://EXAMPLE.com:443/new#x', 'https://example.com/new']:
             response = await self.client.post('/api/sources', json={'url': url}, headers=self.headers)
             self.assertEqual(response.status, 200)
@@ -235,8 +243,54 @@ class DashboardSourcesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(payload['sources']), 2)
         for item in payload['sources']:
             response = await self.client.post('/api/sources/remove', json={'id': item['id']}, headers=self.headers)
-            self.assertEqual(response.status, 200 if item['custom'] else 400)
+            self.assertEqual(response.status, 200)
         self.assertEqual(source_store.read_custom(), [])
+        self.assertEqual((await (await self.client.get('/api/sources', headers=self.headers)).json())['sources'], [])
+        self.assertEqual(source_store.read_store()[1], ['https://example.com/builtin'])
+
+    async def test_edit_builtin_persists_without_touching_config_and_can_restore(self):
+        old = 'https://example.com/builtin'
+        response = await self.client.post('/api/sources/edit', json={'id': source_store.source_id(old), 'url': 'https://example.com/edited'}, headers=self.headers)
+        self.assertEqual(response.status, 200)
+        custom, excluded = source_store.read_store()
+        self.assertEqual(source_store.effective([old], custom, excluded), ['https://example.com/edited'])
+        response = await self.client.post('/api/sources', json={'url': old}, headers=self.headers)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(source_store.read_store()[1], [])
+
+    async def test_edit_invalid_duplicate_or_stale_keeps_original(self):
+        await self.client.post('/api/sources', json={'url': 'https://example.com/custom'}, headers=self.headers)
+        old = source_store.read_store()
+        for url in ['http://127.0.0.1/', 'https://example.com/builtin', None]:
+            response = await self.client.post('/api/sources/edit', json={'id': source_store.source_id('https://example.com/custom'), 'url': url}, headers=self.headers)
+            self.assertEqual(response.status, 400)
+            self.assertEqual(source_store.read_store(), old)
+        response = await self.client.post('/api/sources/edit', json={'id': 'stale', 'url': 'https://example.com/next'}, headers=self.headers)
+        self.assertEqual(response.status, 400)
+        self.assertEqual(source_store.read_store(), old)
+
+    async def test_custom_edit_same_url_and_successful_replacement(self):
+        original = 'https://example.com/a'
+        await self.client.post('/api/sources', json={'url': original}, headers=self.headers)
+        for url in [original, 'https://example.com/b']:
+            response = await self.client.post('/api/sources/edit', json={'id': source_store.source_id(original), 'url': url}, headers=self.headers)
+            self.assertEqual(response.status, 200)
+            self.assertEqual(source_store.read_custom(), [url])
+
+    async def test_failed_builtin_edit_is_atomic(self):
+        source_store.write_custom([])
+        before = (Path(self.tmp.name) / 'sources.json').read_bytes()
+        with patch.object(source_store.os, 'replace', side_effect=OSError('disk full')):
+            response = await self.client.post('/api/sources/edit', json={'id': source_store.source_id('https://example.com/builtin'), 'url': 'https://example.com/new'}, headers=self.headers)
+        self.assertEqual(response.status, 503)
+        self.assertEqual((Path(self.tmp.name) / 'sources.json').read_bytes(), before)
+
+    async def test_legacy_sources_migrate_and_concurrent_edits_detect_stale(self):
+        url = 'https://example.com/old'
+        (Path(self.tmp.name) / 'sources.json').write_text(json.dumps([url]))
+        results = await asyncio.gather(*[self.client.post('/api/sources/edit', json={'id': source_store.source_id(url), 'url': f'https://example.com/edit{i}'}, headers=self.headers) for i in range(2)])
+        self.assertEqual(sorted(r.status for r in results), [200, 400])
+        self.assertEqual(len(source_store.read_custom()), 1)
 
     async def test_concurrent_additions_not_lost(self):
         results = await asyncio.gather(*[self.client.post('/api/sources', json={'url': f'https://example.com/{i}'}, headers=self.headers) for i in range(8)])
