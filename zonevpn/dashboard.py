@@ -38,6 +38,8 @@ server list crosses the network in the clear; turn it off with
 
 from __future__ import annotations
 
+from . import source_store
+
 import asyncio
 import base64
 import getpass
@@ -431,6 +433,75 @@ async def api_history(_request: web.Request) -> web.Response:
     return web.json_response(_history())
 
 
+def _source_payload():
+    cfg, error = cfgmod.load_lenient()
+    if error:
+        raise ValueError("Fix config.json before managing sources.")
+    configured = source_store.configured_urls(cfg.get("sources", []))
+    custom = source_store.read_custom()
+    health = state._read_json(state.STATE_DIR / "source_health.json", {})
+    if not isinstance(health, dict):
+        health = {}
+    return {
+        "ok": True, "limit": source_store.MAX_CUSTOM,
+        "sources": [{"id": source_store.source_id(u), "url": u,
+                     "custom": u in custom and u not in configured,
+                     "health": health.get(source_store.source_id(u), {})}
+                    for u in source_store.effective(configured, custom)],
+    }
+
+
+async def api_sources(_request: web.Request) -> web.Response:
+    try:
+        return web.json_response(_source_payload())
+    except (OSError, ValueError) as exc:
+        message = str(exc) if isinstance(exc, ValueError) else "Cannot read saved sources."
+        return web.json_response({"ok": False, "message": message}, status=503)
+
+
+async def api_source_change(request: web.Request) -> web.Response:
+    # JSON-only requests plus Strict cookies reject cross-site form submits.
+    if request.content_type != "application/json":
+        return web.json_response({"ok": False, "message": "JSON required."}, status=415)
+    data = bytearray()
+    try:
+        async for chunk in request.content.iter_chunked(4096):
+            data.extend(chunk)
+            if len(data) > 8192:
+                return web.json_response({"ok": False, "message": "Request too large."}, status=413)
+        body = json.loads(data)
+        if not isinstance(body, dict):
+            raise ValueError("Expected a JSON object.")
+        # No await in this read/modify/write section: concurrent dashboard
+        # requests cannot lose each other's changes.
+        payload = _source_payload()
+        custom = source_store.read_custom()
+        if request.path.endswith("/remove"):
+            sid = body.get("id")
+            removable = {s["id"] for s in payload["sources"] if s["custom"]}
+            if sid not in removable:
+                raise ValueError("Source is missing or managed in config.json.")
+            custom = [u for u in custom if source_store.source_id(u) != sid]
+            source_store.write_custom(custom)
+            message = "Removed. Takes effect next cycle."
+        else:
+            url = source_store.normalize_url(body.get("url"))
+            if any(s["url"] == url for s in payload["sources"]):
+                message = "This source already exists."
+            else:
+                if len(custom) >= source_store.MAX_CUSTOM or len(payload["sources"]) >= source_store.MAX_SOURCES:
+                    raise ValueError("Source limit reached. Remove an unused custom source first.")
+                source_store.write_custom(custom + [url])
+                message = "Saved. Download and server testing start next cycle."
+        return web.json_response({**_source_payload(), "message": message})
+    except (ValueError, TypeError) as exc:
+        # Normalize JSON parse errors without leaking input.
+        message = "Invalid request." if isinstance(exc, (json.JSONDecodeError, TypeError)) else str(exc)
+        return web.json_response({"ok": False, "message": message}, status=400)
+    except OSError:
+        return web.json_response({"ok": False, "message": "Could not complete source update. Reload the list before retrying."}, status=503)
+
+
 async def api_add(request: web.Request) -> web.Response:
     """Add a server by share link. It's parsed/validated, stored, and picked up
     (tested + published if it's actually fast) on the next cycle."""
@@ -553,6 +624,9 @@ def build_app(config_error: str | None = None) -> web.Application:
         web.post("/logout", logout),
         web.get("/api/status", api_status),
         web.get("/api/history", api_history),
+        web.get("/api/sources", api_sources),
+        web.post("/api/sources", api_source_change),
+        web.post("/api/sources/remove", api_source_change),
         web.get("/api/logs", api_logs),
         web.get("/api/logs/download", api_logs_download),
         web.post("/api/restart", api_restart),
@@ -992,6 +1066,21 @@ tbody tr:hover td{background:#131826}
    <div class="sub" id="blockedBox"><h3>Blocked <span id="bCount"></span></h3><div id="blocked"></div></div>
   </section>
 
+  <section class="card s12"><h2>Source links <span class="r" id="sourceCount"></span></h2>
+   <div class="pad">
+    <form id="sourceForm" style="display:flex;gap:8px;flex-wrap:wrap">
+     <input class="input grow mono" id="sourceUrl" type="url" maxlength="2048" required aria-label="Source URL" placeholder="https://example.com/subscription.txt"/>
+     <button class="btn primary" id="bSourceAdd" type="submit">Add source</button>
+    </form>
+    <p class="muted">Public HTTP(S) subscription links: plain text or base64 containing vmess, vless, trojan or ss links. Changes apply next cycle; servers must pass the existing quality checks before publication.</p>
+    <p id="sourceMessage" role="status" aria-live="polite"></p>
+   </div>
+   <div class="tbl" style="max-height:420px"><table>
+    <thead><tr><th class="nosort">Source URL</th><th class="nosort">Download status</th><th class="nosort">Raw links</th><th class="nosort">Last check</th><th class="nosort"></th></tr></thead>
+    <tbody id="sourceRows"><tr><td colspan="5" class="empty">Loading…</td></tr></tbody>
+   </table></div>
+  </section>
+
   <section class="card s5"><h2>Sources <span class="r">yield in the last cycle</span></h2>
    <div class="tbl" style="max-height:470px;margin-top:12px"><table>
     <thead><tr><th class="nosort">Source</th><th class="nosort">Alive</th><th class="nosort">Tested</th><th class="nosort"></th></tr></thead>
@@ -1308,6 +1397,24 @@ function renderSources(){
     : '<tr><td colspan="4" class="empty">No source yields in the log yet.</td></tr>';
 }
 
+function renderSourceLinks(d){
+  const items = d.sources || [];
+  $('sourceCount').textContent = items.length + ' sources · ' + items.filter(s => s.custom).length + '/' + d.limit + ' custom';
+  $('sourceRows').innerHTML = items.length ? items.map(s => {
+    const h = s.health || {}, status = h.status || 'pending';
+    const cls = status === 'ok' ? 'good' : status === 'error' ? 'bad' : 'muted';
+    return `<tr><td class="mono" style="max-width:440px;overflow:hidden;text-overflow:ellipsis" title="${esc(s.url)}">${esc(s.url)}</td>` +
+      `<td class="${cls}" title="${esc(h.message || 'Awaiting next cycle')}">${esc(status)}<div class="muted" style="white-space:normal;max-width:280px">${esc(h.message || 'Awaiting next cycle')}</div></td>` +
+      `<td>${num(h.links)}</td><td>${h.checked_at ? esc(new Date(h.checked_at * 1000).toLocaleTimeString()) : '–'}</td>` +
+      `<td>${s.custom ? `<button class="btn sm" data-source-remove="${esc(s.id)}">Remove</button>` : '<span class="muted">Configured</span>'}</td></tr>`;
+  }).join('') : '<tr><td colspan="5" class="empty">No source links yet.</td></tr>';
+}
+async function refreshSourceLinks(){
+  const r = await api('/api/sources'), d = await r.json();
+  if (!d.ok){ $('sourceMessage').textContent = d.message || 'Could not load sources.'; return; }
+  renderSourceLinks(d);
+}
+
 // ── logs ──────────────────────────────────────────────────────────────────
 let logOff = null, logLines = [], carry = '', LVL = 'all', LQ = '';
 const isErr = l => / (ERROR|CRITICAL) /.test(l), isWarn = l => / WARNING /.test(l);
@@ -1357,12 +1464,38 @@ function every(fn, ms){
 }
 every(refresh, 5000);
 every(refreshHistory, 30000);
+every(refreshSourceLinks, 15000);
 every(pullLog, 3000);
 setInterval(() => { if (S) renderTop(); }, 1000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden){ refresh().catch(() => {}); pullLog().catch(() => {}); } });
 let rz; window.addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(renderHistory, 150); });
 
 // ── actions ───────────────────────────────────────────────────────────────
+$('sourceForm').onsubmit = async e => {
+  e.preventDefault();
+  const button = $('bSourceAdd');
+  if (button.disabled) return;
+  button.disabled = true;
+  $('sourceMessage').textContent = 'Saving…';
+  try {
+    const d = await post('/api/sources', {url: $('sourceUrl').value.trim()});
+    $('sourceMessage').textContent = d.message || 'Could not save source.';
+    if (d.ok){ $('sourceUrl').value = ''; renderSourceLinks(d); }
+  } catch (_) { $('sourceMessage').textContent = 'Connection lost. Refresh sources before retrying.'; }
+  finally { button.disabled = false; }
+};
+$('sourceRows').onclick = async e => {
+  const button = e.target.closest('[data-source-remove]');
+  if (!button || button.disabled) return;
+  if (!await ask('Remove this source?', 'The collector will stop using this source from the next cycle.', 'Remove', true)) return;
+  button.disabled = true;
+  try {
+    const d = await post('/api/sources/remove', {id: button.dataset.sourceRemove});
+    $('sourceMessage').textContent = d.message || 'Could not remove source.';
+    if (d.ok) renderSourceLinks(d);
+  } catch (_) { $('sourceMessage').textContent = 'Connection lost. Refresh sources before retrying.'; }
+  finally { button.disabled = false; }
+};
 $('q').addEventListener('input', e => { UI.q = e.target.value; renderServers(); });
 $('fProto').addEventListener('change', e => { UI.proto = e.target.value; saveUI(); renderServers(); });
 $('bClear').onclick = () => { UI.q = ''; UI.cc = ''; UI.proto = ''; $('q').value = ''; saveUI(); renderServers(); };
