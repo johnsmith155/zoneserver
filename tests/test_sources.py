@@ -193,9 +193,20 @@ class SourceTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(sources._CACHE)
 
     async def test_global_deadline_retains_completed_source(self):
-        with patch.object(sources, 'PublicResolver', LocalResolver), patch.object(sources, 'CYCLE_TIMEOUT', .05):
+        cancelled = asyncio.Event()
+        async def fetch(_session, url, _health):
+            if url.endswith('/good'):
+                return [LINK]
+            try:
+                await asyncio.Future()
+            finally:
+                cancelled.set()
+        # Test deadline/cancellation independently of host scheduling and DNS.
+        # Real HTTP timeouts and parsing are exercised by the other tests.
+        with patch.object(sources, '_fetch_one', fetch), patch.object(sources, 'CYCLE_TIMEOUT', .2):
             result = await sources.collect([self.base + 'good', self.base + 'slow'])
         self.assertEqual(len(result), 1)
+        self.assertTrue(cancelled.is_set())
 
     async def test_cache_byte_budget(self):
         with patch.object(sources, 'CACHE_BYTES', 450):
